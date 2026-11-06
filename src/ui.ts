@@ -571,6 +571,13 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
           </h2>
           <div id="modelstatus-body" class="hint" style="margin-top:0">加载中…</div>
           <div class="hint">逐个模型试调一次,把不可用的(余额不足 / 模型下线)标灰;不可用的模型不会出现在 <code>/v1/models</code>。</div>
+          <div style="margin-top:10px;border-top:1px solid var(--line);padding-top:8px">
+            <div class="hint" style="margin-bottom:4px">添加自定义模型：不在上游列表里的模型 ID 也可以直接加（每行一个；下次探活会自动验证，调不通的会被屏蔽）</div>
+            <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px"><label style="white-space:nowrap">加到</label><select id="pool-custom-key" style="flex:1"></select></div>
+            <textarea id="pool-custom-input" rows="2" placeholder="模型 ID，每行一个，例如 openai/gpt-oss-120b:free" style="width:100%;box-sizing:border-box"></textarea>
+            <div style="margin-top:6px"><button class="btn small" id="pool-custom-add">添加自定义模型</button></div>
+            <div class="hint" id="pool-custom-out" style="margin-top:6px"></div>
+          </div>
         </div>
       </section>
 
@@ -1081,7 +1088,7 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
     if(id==='dashboard') loadModels().then(loadDashboard);
     if(id==='tokens'){ var mo=$('my-mint-out'); if(mo){ mo.style.display='none'; mo.innerHTML=''; } loadMyTokens(); }
     if(id==='overview') loadStats('ov');
-    if(id==='keys'){ loadStats('keys'); loadModelStatus(); }
+    if(id==='keys'){ loadStats('keys'); loadModelStatus(); loadPoolCustomKeys(); }
     if(id==='keylist'){ var rb=$('keylist-refresh'); if(rb) rb.onclick=loadKeyList; var cb=$('keylist-checkall'); if(cb) cb.onclick=checkAllKeys; var tg=$('keylist-toggle'); if(tg) tg.onclick=function(){ keylistShowDisabled=!keylistShowDisabled; loadKeyList(); }; var pr=$('keylist-prune'); if(pr) pr.onclick=function(){ if(!confirm('清理所有永久失效的 key?欠费的会保留')) return; pr.disabled=true; var out=$('keylist-checkall-out'); if(out) out.textContent='清理中…'; api('/admin/keys/prune',{method:'POST'}).then(function(r){ pr.disabled=false; if(out) out.textContent='已清理 '+((r.body&&r.body.removed)||0)+' 个失效 key'; loadKeyList(); }).catch(function(){ pr.disabled=false; if(out) out.textContent='清理出错'; }); }; loadKeyList(); }
     if(id==='users') loadUsers();
     if(id==='admintokens') loadAdminTokens();
@@ -2163,6 +2170,40 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
     }).catch(function(){ if(btn) btn.disabled=false; if(el) el.innerHTML='<span class="e">探测出错</span>'; });
   }
 
+  // ---------------- Key 池: 添加自定义模型 ----------------
+  // Same endpoint as the per-key panel (POST /admin/keys/:id/models), but
+  // reachable from the pool page, where model availability lives. The key
+  // select lists usable keys (active + cooldown, not disabled).
+  function loadPoolCustomKeys(){
+    var sel=$('pool-custom-key'); if(!sel) return;
+    return api('/admin/keys/list').then(function(r){
+      var list=(r.ok && r.body && Array.isArray(r.body.keys)) ? r.body.keys.filter(function(k){ return k.status!=='disabled'; }) : [];
+      var b=$('pool-custom-add');
+      if(!list.length){ sel.innerHTML='<option value="">还没有可用的 key · 先去上方导入</option>'; if(b) b.disabled=true; return; }
+      sel.innerHTML=list.map(function(k){ return '<option value="'+k.id+'">'+esc(k.provider)+' #'+k.id+' · '+esc(k.masked||'')+'</option>'; }).join('');
+      if(b) b.disabled=false;
+    }).catch(function(){ sel.innerHTML='<option value="">加载 key 失败</option>'; });
+  }
+  function poolCustomAdd(){
+    var sel=$('pool-custom-key'), ta=$('pool-custom-input'), out=$('pool-custom-out'), btn=$('pool-custom-add');
+    var id=sel?sel.value:''; if(!id){ if(out) out.innerHTML='<span class="e">先选一个 key</span>'; return; }
+    var typed=(ta.value||'').split(/[\n,;]+/).map(function(s){ return s.trim(); }).filter(Boolean);
+    var bad=typed.filter(function(s){ return /\s/.test(s); });
+    var list=typed.filter(function(s){ return !/\s/.test(s); });
+    list=list.filter(function(v,i){ return list.indexOf(v)===i; });
+    if(!list.length){ if(out) out.innerHTML='<span class="e">先输入模型 ID（每行一个，ID 里不能有空格）</span>'; return; }
+    btn.disabled=true; if(out) out.textContent='添加中…';
+    api('/admin/keys/'+id+'/models',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({models:list})}).then(function(r){
+      btn.disabled=false;
+      if(!r.ok){ if(out) out.innerHTML='<span class="e">添加失败 '+esc((r.body&&r.body.error&&r.body.error.message)||('错误 '+r.status))+'</span>'; return; }
+      var note=bad.length?(' · 已跳过含空格的输入：'+esc(bad.join('、'))):'';
+      if(out) out.innerHTML='<span class="k">已添加 '+(r.body.added||0)+' 个新模型（共提交 '+(r.body.total||0)+' 个）</span> · 下次探活会自动验证'+note;
+      ta.value='';
+      loadModelStatus();
+      loadModels().then(function(){ renderModelsInto('models-body'); renderModelsInto('docs-models-body'); });
+    }).catch(function(){ btn.disabled=false; if(out) out.innerHTML='<span class="e">网络错误</span>'; });
+  }
+
   // ---------------- admin: users ----------------
   function loadUsers(){
     var tb=$('users-body');
@@ -2260,6 +2301,7 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
   $('keys-tokeylist').onclick = function(){ selectSection('keylist'); };
   $('modelstatus-refresh').onclick = loadModelStatus;
   $('modelstatus-probe').onclick = probeModels;
+  $('pool-custom-add').onclick = poolCustomAdd;
   $('importBtn').onclick = importKeys;
   $('users-refresh').onclick = loadUsers;
   $('adm-mint').onclick = mintAdmin;
