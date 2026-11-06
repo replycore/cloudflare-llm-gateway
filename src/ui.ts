@@ -1980,9 +1980,16 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
           if(del.getAttribute('data-armed')){
             del.disabled=true; del.textContent='删除中…';
             api('/admin/keys/'+id,{method:'DELETE'}).then(function(r){
-              if(!r.ok){ del.disabled=false; del.textContent='删'; del.removeAttribute('data-armed'); return; }
+              if(!r.ok){
+                del.disabled=false; del.textContent='删'; del.removeAttribute('data-armed');
+                var res=tr.querySelector('.kl-result'); if(res) res.innerHTML='<span style="color:var(--red)">删除失败 '+r.status+'</span>';
+                return;
+              }
               loadKeyList();
-            }).catch(function(){ del.disabled=false; del.textContent='删'; del.removeAttribute('data-armed'); });
+            }).catch(function(){
+              del.disabled=false; del.textContent='删'; del.removeAttribute('data-armed');
+              var res2=tr.querySelector('.kl-result'); if(res2) res2.innerHTML='<span style="color:var(--red)">删除出错（网络）</span>';
+            });
             return;
           }
           del.setAttribute('data-armed','1');
