@@ -8,8 +8,10 @@
 
 import type { Env, Provider } from "./types";
 import { PROVIDERS } from "./types";
-import { listDueForProbe, markProbed, markAllDueForProbe, getProbeProgress, reactivateKey, applyOutcome, setKeyProjectId, setKeyBalance, setModelStatus, listModelStatus, oneActiveKey } from "./db";
+import { listDueForProbe, markProbed, markAllDueForProbe, getProbeProgress, reactivateKey, applyOutcome, setKeyProjectId, setKeyBalance, setModelStatus, listModelStatus, oneActiveKey, oneActiveKeyRow, firstCustomModel } from "./db";
 import { getAdapter } from "./providers";
+import { makeCustomAdapter, normalizeBaseUrl } from "./providers/custom";
+import { customServiceSlug } from "./providers/types";
 import { cooldownMinutes, MAX_CONSECUTIVE_FAILS } from "./keypool";
 
 /** Truncate an upstream error body for a compact status reason. */
@@ -43,9 +45,29 @@ export interface ProbeResult {
  * model list is fetched live after entering a key, never hardcoded. */
 export const OPENROUTER_FREE_PROBE_MODEL = "stealth/crouton-alpha";
 
-/** Live-probe one key. OpenRouter/DeepSeek also return real balance. */
-export async function probeKey(provider: Provider, key: string): Promise<ProbeResult> {
+/** Live-probe one key. OpenRouter/DeepSeek also return real balance.
+ * Custom keys need `opts.baseUrl` (their service's base URL) and, when the
+ * service has an added model, `opts.model` for a real inference probe. */
+export async function probeKey(provider: Provider, key: string, opts?: { baseUrl?: string; model?: string }): Promise<ProbeResult> {
   try {
+    if (provider === "custom") {
+      const base = normalizeBaseUrl(opts?.baseUrl ?? "");
+      if (!base) return { alive: false, status: 0, rateLimited: false, balance: null, error: "自定义服务缺少 base_url" };
+      // With a known added model, prove real inference with a 1-token chat;
+      // otherwise the /v1/models list is the liveness check (same as mistral/openai).
+      if (opts?.model) {
+        const r = await makeCustomAdapter(base).chatCompletions(
+          { model: opts.model, messages: [{ role: "user", content: "hi" }], max_tokens: 1 },
+          key
+        );
+        if (r.status === 401 || r.status === 403) return { alive: false, status: r.status, rateLimited: false, balance: null, error: "invalid key" };
+        if (r.ok || r.status === 429) return { alive: r.ok, status: r.status, rateLimited: r.status === 429, balance: null, error: r.ok ? undefined : "限流" };
+        const t = await r.text().catch(() => "");
+        return { alive: false, status: r.status, rateLimited: false, balance: null, error: snippet(t) || `http ${r.status}` };
+      }
+      const r = await fetch(`${base}/v1/models`, { headers: { authorization: `Bearer ${key}` } });
+      return { alive: r.ok, status: r.status, rateLimited: r.status === 429, balance: null, error: r.ok ? undefined : `http ${r.status}` };
+    }
     if (provider === "openrouter") {
       const r = await fetch("https://openrouter.ai/api/v1/credits", { headers: { authorization: `Bearer ${key}` } });
       if (r.status === 401 || r.status === 403) return { alive: false, status: r.status, rateLimited: false, balance: null, error: "invalid key" };
@@ -250,6 +272,23 @@ export interface SweepResult {
  * entire pool; without it, only genuinely-stale keys are touched (cheap
  * background rotation — active keys are validated for free by real traffic).
  */
+/** Probe options for a key row: custom keys need their base URL and, when
+ * the service has an added model, that model for a real inference probe.
+ * Built-ins need nothing. */
+export async function probeOptsForKey(
+  env: Env,
+  key: { provider: Provider; base_url: string | null; service_slug: string | null }
+): Promise<{ baseUrl?: string; model?: string }> {
+  if (key.provider !== "custom") return {};
+  const opts: { baseUrl?: string; model?: string } = {};
+  if (key.base_url) opts.baseUrl = key.base_url;
+  if (key.service_slug) {
+    const m = await firstCustomModel(env, key.service_slug);
+    if (m) opts.model = m;
+  }
+  return opts;
+}
+
 export async function runSweep(
   env: Env,
   opts: { markAll?: boolean; limit?: number } = {}
@@ -262,7 +301,7 @@ export async function runSweep(
   const results = await Promise.all(
     subset.map(async (k) => {
       try {
-        const r = await probeKey(k.provider, k.api_key);
+        const r = await probeKey(k.provider, k.api_key, await probeOptsForKey(env, k));
         if (r.projectId) await setKeyProjectId(env, k.id, r.projectId);
         if (r.balance && r.balance.remaining != null) {
           await setKeyBalance(env, k.id, r.balance.remaining, r.balance.unit);
@@ -344,11 +383,23 @@ export async function probeModels(env: Env): Promise<{ checked: number; blocked:
     if (probed.has(k)) return;
     probed.add(k);
     if (checked >= MAX_CALLS) return;
-    const key = await keyFor(provider);
-    if (!key) return;
+    // Custom models are `custom:<slug>:<model>` — the probe must use a key
+    // of THAT service (keys of other custom services point elsewhere).
+    let key: string | null;
+    let adapter = getAdapter(provider);
+    if (provider === "custom") {
+      const slug = customServiceSlug(model);
+      const row = slug ? await oneActiveKeyRow(env, provider, slug) : null;
+      if (!row) return;
+      key = row.api_key;
+      adapter = makeCustomAdapter(row.base_url ?? "");
+    } else {
+      key = await keyFor(provider);
+      if (!key) return;
+    }
     checked++;
     try {
-      const r = await getAdapter(provider).chatCompletions(
+      const r = await adapter.chatCompletions(
         { model, messages: [{ role: "user", content: "hi" }], max_tokens: 1 },
         key
       );

@@ -1,6 +1,6 @@
 /** Error classification + the callWithPool dispatcher (retry across keys, apply health outcomes). */
 
-import type { Env, Provider, Outcome } from "./types";
+import type { ApiKeyRow, Env, Provider, Outcome } from "./types";
 import {
   listActiveKeys,
   recordSuccess,
@@ -172,6 +172,10 @@ export function splitUsage(
 
 /**
  * Core dispatcher. Picks active keys for `provider` and calls `attempt(key)`.
+ * The callback receives the full key ROW (not just the key string) so
+ * callers can build per-key adapters — custom services need the row's
+ * `base_url`. For custom services `meta.slug` narrows the pick to one
+ * service; keys of different slugs are different upstreams and must not mix.
  * For 2xx responses (including streams) the Response is returned untouched —
  * its body is never read here. Only non-2xx responses are cloned and read to
  * classify the key's health.
@@ -179,9 +183,11 @@ export function splitUsage(
 export async function callWithPool(
   env: Env,
   provider: Provider,
-  attempt: (key: string) => Promise<Response>,
+  attempt: (key: ApiKeyRow) => Promise<Response>,
   meta?: {
     model?: string;
+    /** Custom service slug: only keys of this service are tried. */
+    slug?: string;
     tokenId?: number | null;
     ownerSub?: string | null;
     promptChars?: number;
@@ -205,14 +211,15 @@ export async function callWithPool(
   const promptChars = meta?.promptChars ?? null;
   const ctx = meta?.ctx ?? null;
   const finalOnFailure = meta?.finalOnFailure ?? true;
-  let keys = await listActiveKeys(env, provider);
+  const slug = meta?.slug ?? undefined;
+  let keys = await listActiveKeys(env, provider, slug);
 
   // Inline unattended recovery: with no CF cron available, revive any keys whose
   // cooldown has expired and retry once before declaring the pool empty.
   if (keys.length === 0) {
     const revived = await reviveExpiredCooldowns(env, Date.now());
     if (revived > 0) {
-      keys = await listActiveKeys(env, provider);
+      keys = await listActiveKeys(env, provider, slug);
     }
   }
 
@@ -244,7 +251,7 @@ export async function callWithPool(
     const started = Date.now();
     let res: Response;
     try {
-      res = await attempt(key.api_key);
+      res = await attempt(key);
     } catch (err) {
       // Network / fetch failure — treat as transient and try the next key.
       const latencyMs = Date.now() - started;

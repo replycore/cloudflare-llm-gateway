@@ -16,8 +16,12 @@ export type Provider =
   | "ai21"
   | "cohere"
   | "elevenlabs"
-  | "stability";
+  | "stability"
+  | "custom";
 
+/** A custom OpenAI-compatible service is addressed as `custom:<slug>:<model>`
+ * (e.g. `custom:2api:gpt-4o`). The slug is the service's user-chosen name;
+ * it is what keeps two custom services' keys and models from mixing. */
 export const PROVIDERS: Provider[] = [
   "gemini",
   "mistral",
@@ -35,6 +39,7 @@ export const PROVIDERS: Provider[] = [
   "cohere",
   "elevenlabs",
   "stability",
+  "custom",
 ];
 
 export interface Env {
@@ -94,6 +99,13 @@ export interface ApiKeyRow {
   created_at: number;
   /** Provider account/project identifier (e.g. gemini Google project number). */
   project_id: string | null;
+  /** Custom OpenAI-compatible service only (provider = "custom"): the
+   * service's base URL, normalized to end with /v1. NULL for built-ins. */
+  base_url: string | null;
+  /** Custom service only: the user-chosen service name (slug) this key
+   * belongs to, e.g. "2api". Keys sharing a slug are one service (same
+   * upstream) and pool together; different slugs never mix. */
+  service_slug: string | null;
   /** Last-probed upstream balance (NULL = unknown / provider exposes none). */
   balance_remaining: number | null;
   /** Unit for `balance_remaining`, e.g. "USD" | "credits". */

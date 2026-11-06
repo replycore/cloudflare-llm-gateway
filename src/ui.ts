@@ -547,9 +547,27 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
           <h2 class="h-yellow"><span class="hd"></span>导入 key</h2>
           <label>provider:key — 一行一个</label>
           <textarea id="keys" spellcheck="false" placeholder="gemini:AIzaSy...&#10;openrouter:sk-or-v1-...&#10;mistral:..."></textarea>
-          <div style="margin-top:13px"><button class="btn primary" id="importBtn">导入并自动上架</button><button class="btn primary" id="importSelectBtn" style="margin-left:8px;">导入并选择模型</button></div>
+          <div style="margin-top:13px"><button class="btn primary" id="importBtn">导入并自动上架</button><button class="btn primary" id="importSelectBtn" style="margin-left:8px;">导入并选择模型</button><button class="btn primary" id="customServiceBtn" style="margin-left:8px;">添加自定义服务</button></div>
 <div class="out" id="importOut" style="display:none"></div>
           <div class="hint">支持 <code>gemini</code> <code>openai</code> <code>mistral</code> <code>openrouter</code> <code>deepseek</code> <code>groq</code> <code>moonshot</code> <code>glm</code> <code>qwen</code> <code>deepinfra</code> <code>fireworks</code> <code>cerebras</code> <code>ai21</code> <code>cohere</code> <code>elevenlabs</code> <code>stability</code>。重复自动跳过；坏 key 首次调用即自动禁用。</div>
+          <div id="customServicePanel" style="display:none;margin-top:14px;border-top:1px solid var(--line);padding-top:12px">
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <input id="csSlug" placeholder="服务名，如 2api" style="width:130px">
+              <input id="csBaseUrl" placeholder="API 地址，如 https://ai.example.com/v1" style="flex:2;min-width:220px">
+              <input id="csKey" type="password" placeholder="API Key" style="flex:1;min-width:160px">
+            </div>
+            <div class="hint" style="margin-top:6px">OpenAI 兼容接口：地址可带 /v1 也可不带，会自动补。添加后模型写作 <code>custom:服务名:模型名</code>，例如 <code>custom:2api:gpt-4o</code>；同一服务名只能对应一个地址。</div>
+            <div style="margin-top:10px"><button class="btn primary" id="csAdd">添加并拉取模型</button><button class="btn ghost" id="csCancel" style="margin-left:8px">取消</button></div>
+            <div class="out" id="csOut" style="display:none"></div>
+            <div id="csModels" style="display:none;margin-top:10px">
+              <div style="display:flex;gap:8px;align-items:center;margin-bottom:6px"><input id="csQ" placeholder="筛选模型…" style="flex:1"><button class="btn primary small" id="csAddSel" disabled>添加选中</button></div>
+              <div class="hint" id="csStatus">正在拉取模型列表…</div>
+              <div id="csList" style="max-height:220px;overflow:auto;margin-top:6px"></div>
+              <div style="margin-top:10px;border-top:1px solid var(--line);padding-top:8px"><div class="hint" style="margin-bottom:4px">手动输入模型（每行一个；上游列表拉不到时用这个）</div>
+              <textarea id="csCustom" rows="2" placeholder="例如 gpt-4o" style="width:100%;box-sizing:border-box"></textarea>
+              <div style="margin-top:6px"><button class="btn small" id="csAddCustom">添加手动模型</button></div></div>
+            </div>
+          </div>
           <div class="out" id="importOut2" style="display:none"></div>
         </div>
         <div class="card r1">
@@ -936,7 +954,7 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
   var modelsErr=false; // distinguish a failed /v1/models fetch from a genuinely empty pool
   var modelsFetchedAt=0; // ms of last successful /v1/models fetch (drives the 更新于 hint)
   // owned_by id → 显示名 (fallback to the raw id)
-  var PROVIDER_ZH={gemini:'Google Gemini',openai:'OpenAI',deepseek:'DeepSeek',qwen:'通义千问',glm:'智谱GLM',moonshot:'Kimi',mistral:'Mistral',groq:'Groq',openrouter:'OpenRouter'};
+  var PROVIDER_ZH={gemini:'Google Gemini',openai:'OpenAI',deepseek:'DeepSeek',qwen:'通义千问',glm:'智谱GLM',moonshot:'Kimi',mistral:'Mistral',groq:'Groq',openrouter:'OpenRouter',custom:'自定义'};
   function loadModels(){
     return api('/v1/models').then(function(r){
       if(!r.ok){ modelsErr=true; modelsCache=[]; return []; }
@@ -2422,7 +2440,9 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
 
     async function loadProviders() {
       var r = await api('/admin/providers');
-      var list = (r.body && r.body.providers) || [];
+      // Custom services need a base URL, which provider:key import can't
+      // express — they go through Key 池「添加自定义服务」 instead.
+      var list = ((r.body && r.body.providers) || []).filter(function(p){ return p !== 'custom'; });
       addProvider.innerHTML = list.map(function(p){ return '<option value="'+p+'">'+p+'</option>'; }).join('');
       if (list.length) onProviderChange();
     }
@@ -2499,6 +2519,94 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
       addKey.value = '';
       o.innerHTML = '<span class="k">新增 '+(r.body.added||0)+'</span> 重复 '+(r.body.duplicate||0)+' · 已启用 '+(r.body.selected||[]).length+' 个模型 · 已屏蔽 '+(r.body.blocked||[]).length+' 个';
       loadStats('keys'); loadStats('ov');
+    };
+  }
+
+  // 自定义 OpenAI 兼容服务（Key 池「添加自定义服务」）：服务名 + base URL +
+  // key → 建 key → 拉取该服务的模型列表勾选添加（拉不到时可手动输入）。
+  var csBtn = $('customServiceBtn');
+  if (csBtn) {
+    var csPanel = $('customServicePanel');
+    var csSlug = $('csSlug'), csBaseUrl = $('csBaseUrl'), csKey = $('csKey');
+    var csOut = $('csOut'), csModels = $('csModels'), csStatus = $('csStatus'), csList = $('csList');
+    var csQ = $('csQ'), csAddSel = $('csAddSel'), csCustom = $('csCustom');
+    var csKeyId = null, csFetched = [];
+    csBtn.onclick = function(){
+      csPanel.style.display = csPanel.style.display === 'none' ? 'block' : 'none';
+      if (csPanel.style.display === 'block') csSlug.focus();
+    };
+    $('csCancel').onclick = function(){ csPanel.style.display = 'none'; };
+    function csShowOut(html){ csOut.style.display = 'block'; csOut.innerHTML = html; }
+    function csUpdateAddBtn(){
+      var n = csList.querySelectorAll('input[type=checkbox]:checked').length;
+      csAddSel.disabled = !n;
+      csAddSel.textContent = n ? ('添加选中 ('+n+')') : '添加选中';
+    }
+    function csRenderList(){
+      var needle = (csQ.value || '').trim().toLowerCase();
+      var shown = needle ? csFetched.filter(function(m){ return m.id.toLowerCase().indexOf(needle) >= 0; }) : csFetched;
+      csList.innerHTML = shown.length ? shown.map(function(m){
+        return '<label style="display:block;margin:4px 0"><input type="checkbox" value="'+esc(m.id)+'"'+(m.isNew?' checked':'')+'> '+esc(m.id)+(m.isNew?' <span class="badge">新</span>':'')+'</label>';
+      }).join('') : '<div class="hint">没有匹配的模型</div>';
+      csUpdateAddBtn();
+    }
+    csList.addEventListener('change', csUpdateAddBtn);
+    csQ.oninput = csRenderList;
+    $('csAdd').onclick = function(){
+      var slug = (csSlug.value || '').trim().toLowerCase();
+      var base = (csBaseUrl.value || '').trim();
+      var key = (csKey.value || '').trim();
+      if (!/^[a-z0-9][a-z0-9-]{0,31}$/.test(slug)) { csShowOut('<span class="e">服务名须为小写字母/数字/连字符（1-32 字符），如 2api</span>'); csSlug.focus(); return; }
+      if (!/^https?:\/\//i.test(base)) { csShowOut('<span class="e">API 地址须为 http(s) 地址，如 https://ai.example.com/v1</span>'); csBaseUrl.focus(); return; }
+      if (!key) { csShowOut('<span class="e">先粘贴 API Key</span>'); csKey.focus(); return; }
+      csShowOut('添加中…');
+      api('/admin/keys/custom', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ slug:slug, base_url:base, api_key:key }) }).then(function(r){
+        if (!r.ok) { csShowOut('<span class="e">'+esc((r.body && r.body.error && r.body.error.message)||('错误 '+r.status))+'</span>'); return; }
+        csKeyId = r.body.id;
+        var dup = r.body.duplicate ? '（该 key 已存在，直接拉取它的模型）' : '';
+        csShowOut('<span class="k">服务 '+esc(slug)+' 已添加'+dup+'</span> · 正在拉取模型列表…');
+        csModels.style.display = 'block';
+        csStatus.textContent = '正在用该 key 向上游拉取模型列表…';
+        api('/admin/keys/'+csKeyId+'/live-models', { method:'POST' }).then(function(r2){
+          if (!r2.ok || !r2.body || !Array.isArray(r2.body.models)) {
+            csStatus.innerHTML = '<span class="e">拉取失败 '+esc((r2.body && r2.body.error && r2.body.error.message)||('错误 '+r2.status))+'</span> · 可用下方手动输入添加模型';
+            return;
+          }
+          var known = {}; (r2.body.known || []).forEach(function(m){ known[m] = 1; });
+          csFetched = r2.body.models.map(function(m){ return { id:m, isNew:!known[m] }; });
+          var nNew = csFetched.filter(function(m){ return m.isNew; }).length;
+          csStatus.textContent = '共 '+csFetched.length+' 个模型 · 新模型 '+nNew+' 个已默认勾选（已有模型不勾选）';
+          csRenderList();
+        }).catch(function(){ csStatus.innerHTML = '<span class="e">网络错误</span> · 可用下方手动输入添加模型'; });
+        loadStats('keys'); loadStats('ov');
+      }).catch(function(){ csShowOut('<span class="e">网络错误</span>'); });
+    };
+    function csAddModels(list, done){
+      if (!csKeyId) { csShowOut('<span class="e">先添加服务</span>'); return; }
+      api('/admin/keys/'+csKeyId+'/models', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ models:list }) }).then(function(r){
+        if (!r.ok) { csStatus.innerHTML = '<span class="e">添加失败 '+esc((r.body && r.body.error && r.body.error.message)||('错误 '+r.status))+'</span>'; return; }
+        csStatus.innerHTML = '<span class="k">已添加 '+(r.body.added||0)+' 个新模型（共提交 '+(r.body.total||0)+' 个）</span> · 模型列表已刷新';
+        loadModels().then(function(){ renderModelsInto('models-body'); renderModelsInto('docs-models-body'); });
+        if (done) done();
+      }).catch(function(){ csStatus.innerHTML = '<span class="e">网络错误</span>'; });
+    }
+    csAddSel.onclick = function(){
+      var sel = Array.prototype.map.call(csList.querySelectorAll('input[type=checkbox]:checked'), function(cb){ return cb.value; });
+      if (!sel.length) return;
+      csAddSel.disabled = true; csStatus.textContent = '添加中…';
+      csAddModels(sel, function(){ csAddSel.disabled = false; });
+    };
+    $('csAddCustom').onclick = function(){
+      var typed = (csCustom.value || '').split(/[\n,;]+/).map(function(s){ return s.trim(); }).filter(Boolean);
+      var bad = typed.filter(function(s){ return /\s/.test(s); });
+      var list = typed.filter(function(s){ return !/\s/.test(s); });
+      list = list.filter(function(v, i){ return list.indexOf(v) === i; });
+      if (!list.length) { csStatus.innerHTML = '<span class="e">先输入模型 ID（每行一个，ID 里不能有空格）</span>'; return; }
+      csStatus.textContent = '添加中…';
+      csAddModels(list, function(){
+        if (bad.length) csStatus.innerHTML += ' · 已跳过含空格的输入：' + esc(bad.join('、'));
+        csCustom.value = '';
+      });
     };
   }
 

@@ -139,7 +139,9 @@ export function applyReasoning(provider: Provider, body: OpenAIChatRequest): Ope
       out.reasoning_effort = effort;
       break;
     case "openai":
+    case "custom":
       // unverified: only reasoning models accept it; gpt-4o would 400.
+      // (custom services are OpenAI-compatible, so the OpenAI dialect applies.)
       if (canReason(model)) out.reasoning_effort = effort === "max" ? "xhigh" : effort;
       break;
     case "qwen":

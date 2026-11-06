@@ -18,6 +18,8 @@ CREATE TABLE IF NOT EXISTS keypool_gateway_api_keys (
   project_id        TEXT,                              -- e.g. gemini Google project number
   balance_remaining REAL,                              -- last-probed upstream balance (NULL = unknown / provider has no balance API)
   balance_unit      TEXT,                              -- e.g. "USD" | "credits"
+  base_url          TEXT,                              -- custom provider only: service base URL, normalized to end with /v1
+  service_slug      TEXT,                              -- custom provider only: user-chosen service name, e.g. "2api"
   UNIQUE(provider, api_key)
 );
 

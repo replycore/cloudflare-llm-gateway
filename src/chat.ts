@@ -9,8 +9,9 @@
 import type { Env, Provider } from "./types";
 import { PROVIDERS } from "./types";
 import type { OpenAIChatRequest } from "./providers/types";
-import { routeModelToProvider, FALLBACK_MODEL, clampMaxTokens } from "./providers/types";
+import { routeModelToProvider, FALLBACK_MODEL, clampMaxTokens, customServiceSlug } from "./providers/types";
 import { getAdapter } from "./providers";
+import { makeCustomAdapter } from "./providers/custom";
 import { callWithPool } from "./keypool";
 import {
   incrementTokenUse,
@@ -217,8 +218,13 @@ export async function serveChat(
       : undefined;
     for (let i = 0; i < order.length; i++) {
       const prov = order[i];
-      const adapter = getAdapter(prov);
+      // Custom services have no registry adapter: each key carries its own
+      // base URL, so the adapter is built per key inside the attempt.
+      const adapter = prov === "custom" ? null : getAdapter(prov);
       const useModel = auto ? (pick[prov] as string) : prov === provider ? body.model : FALLBACK_MODEL[prov];
+      // Custom models are `custom:<slug>:<model>` — the slug picks which
+      // service's keys the pool tries (keys of other services must not mix).
+      const slug = prov === "custom" ? customServiceSlug(useModel) ?? undefined : undefined;
       // Clamp max_tokens to the provider's cap: an over-limit value makes some
       // upstreams reject (or emit an empty SSE stream) instead of serving.
       const clamped = clampMaxTokens(prov, (body as { max_tokens?: number }).max_tokens, useModel);
@@ -234,8 +240,12 @@ export async function serveChat(
         (reqBody as { stream_options?: unknown }).stream_options = { include_usage: true };
       }
       try {
-        res = await callWithPool(env, prov, (key) => adapter.chatCompletions(reqBody, key), {
+        res = await callWithPool(env, prov, (row) => {
+          const a = prov === "custom" ? makeCustomAdapter(row.base_url ?? "") : adapter!;
+          return a.chatCompletions(reqBody, row.api_key);
+        }, {
           model: useModel,
+          slug,
           tokenId: caller.tokenId,
           ownerSub: caller.ownerSub,
           ctx,

@@ -32,11 +32,16 @@ import {
   listAvailableModels,
   setModelStatus,
   normalizeModelKey,
+  addCustomKey,
+  customServiceBaseUrl,
+  firstCustomModel,
 } from "../db";
 import { cooldownMinutes, MAX_CONSECUTIVE_FAILS } from "../keypool";
 import { runHealthCheck } from "../cron";
-import { probeKey, runCheckAll, runSweep, sweepProgress, probeModels } from "../probe";
+import { probeKey, runCheckAll, runSweep, sweepProgress, probeModels, probeOptsForKey } from "../probe";
 import { getAdapter } from "../providers";
+import { makeCustomAdapter, normalizeBaseUrl, isValidServiceSlug } from "../providers/custom";
+import { customServiceSlug, customPlainModel, customModelId } from "../providers/types";
 import type { OpenAIChatRequest } from "../providers/types";
 
 const app = new Hono<{ Bindings: Env }>();
@@ -68,6 +73,12 @@ function parseKeyLines(text: string): {
     }
     const provider = line.slice(0, idx).trim().toLowerCase();
     const api_key = line.slice(idx + 1).trim();
+    // Custom services carry a base URL that `provider:key` lines can't
+    // express — they go through POST /keys/custom instead.
+    if (provider === "custom") {
+      skipped.push(line);
+      continue;
+    }
     if (api_key.length === 0 || !isProvider(provider)) {
       skipped.push(line);
       continue;
@@ -102,7 +113,7 @@ type LiveModelsResult =
   | { ok: true; models: string[] }
   | { ok: false; status: number; message: string; type: string; upstreamStatus?: number };
 
-async function liveModelsFor(provider: Provider, apiKey: string): Promise<LiveModelsResult> {
+async function liveModelsFor(provider: Provider, apiKey: string, baseUrl?: string): Promise<LiveModelsResult> {
   // provider -> { url, header }（Bearer 或 query 参数）
   const LIVE: Record<string, { url: string; auth: "bearer" | "query"; extraHeaders?: Record<string, string> }> = {
     openai:     { url: "https://api.openai.com/v1/models", auth: "bearer" },
@@ -122,7 +133,17 @@ async function liveModelsFor(provider: Provider, apiKey: string): Promise<LiveMo
     elevenlabs: { url: "", auth: "bearer" },
     stability:  { url: "", auth: "bearer" },
   };
-  const cfg = LIVE[provider];
+  // Custom services have no fixed URL: the key's stored base URL is the endpoint.
+  let cfg: { url: string; auth: "bearer" | "query"; extraHeaders?: Record<string, string> } | undefined;
+  if (provider === "custom") {
+    const base = normalizeBaseUrl(baseUrl ?? "");
+    if (!base) {
+      return { ok: false, status: 400, message: "custom service needs a base_url", type: "invalid_request_error" };
+    }
+    cfg = { url: `${base}/v1/models`, auth: "bearer" };
+  } else {
+    cfg = LIVE[provider];
+  }
   if (!cfg || !cfg.url) {
     return { ok: false, status: 400, message: `provider "${provider}" does not expose a /models live endpoint; showing the built-in list instead`, type: "invalid_request_error" };
   }
@@ -197,7 +218,9 @@ app.post("/providers/:provider/live-models", async (c) => {
   if (typeof key !== "string" || !key.trim()) {
     return c.json({ error: { message: "expected { key: string }", type: "invalid_request_error" } }, 400);
   }
-  const res = await liveModelsFor(provider as Provider, key.trim());
+  // Custom services need the base URL too (no fixed upstream to call).
+  const baseUrl = (body as { base_url?: unknown } | null)?.base_url;
+  const res = await liveModelsFor(provider as Provider, key.trim(), typeof baseUrl === "string" ? baseUrl : undefined);
   if (!res.ok) {
     return c.json(
       {
@@ -229,7 +252,7 @@ app.post("/keys/:id/live-models", async (c) => {
   if (!key) {
     return c.json({ error: { message: "key not found", type: "not_found" } }, 404);
   }
-  const res = await liveModelsFor(key.provider, key.api_key);
+  const res = await liveModelsFor(key.provider, key.api_key, key.base_url ?? undefined);
   if (!res.ok) {
     return c.json(
       {
@@ -244,7 +267,16 @@ app.post("/keys/:id/live-models", async (c) => {
   }
   const known = new Set<string>(getAdapter(key.provider).models());
   for (const row of await listAvailableModels(c.env)) {
-    if (row.provider === key.provider) known.add(row.model);
+    if (row.provider !== key.provider) continue;
+    // Custom rows store the full `custom:<slug>:<model>` id, but the live
+    // list returns plain ids — compare plain ids so already-added models
+    // show as known instead of as new.
+    if (key.provider === "custom") {
+      const plain = customPlainModel(row.model);
+      if (plain) known.add(plain);
+    } else {
+      known.add(row.model);
+    }
   }
   return c.json({
     provider: key.provider,
@@ -291,17 +323,63 @@ app.post("/keys/:id/models", async (c) => {
         .filter((m) => Boolean(m) && !/\s/.test(m) && m.length <= 200)
     )
   ).slice(0, 200);
+  // Custom keys store models as `custom:<slug>:<model>`: the slug is what
+  // routes a request to the right service, and two services can serve the
+  // same plain id. Normalize any pasted `custom:<other>:` prefix first so a
+  // re-pasted id doesn't double-prefix.
+  let stored = models;
+  if (key.provider === "custom") {
+    const slug = key.service_slug;
+    if (!slug) {
+      return c.json({ error: { message: "custom key is missing its service slug", type: "invalid_request_error" } }, 400);
+    }
+    stored = models.map((m) => customModelId(slug, customPlainModel(m) ?? m));
+  }
   const already = new Set(
     (await listAvailableModels(c.env))
       .filter((r) => r.provider === key.provider)
       .map((r) => r.model)
   );
   let added = 0;
-  for (const m of models) {
+  for (const m of stored) {
     if (!already.has(m)) added++;
     await setModelStatus(c.env, m, key.provider, true, null);
   }
-  return c.json({ provider: key.provider, added, total: models.length, models });
+  return c.json({ provider: key.provider, added, total: stored.length, models: stored });
+});
+
+// POST /keys/custom — add a custom OpenAI-compatible service: one key for a
+// user-named service (slug) at a base URL. Body: { slug, base_url, api_key }.
+// The slug is the service's identity: keys sharing a slug pool together
+// (same upstream); a slug reused with a different address is rejected so two
+// services can't silently share a name. Returns the key id so the console
+// can fetch that service's live models right after.
+app.post("/keys/custom", async (c) => {
+  let body: unknown = null;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: { message: "invalid json body", type: "invalid_request_error" } }, 400);
+  }
+  const b = (body ?? {}) as { slug?: unknown; base_url?: unknown; api_key?: unknown };
+  const slug = typeof b.slug === "string" ? b.slug.trim().toLowerCase() : "";
+  const baseUrl = typeof b.base_url === "string" ? normalizeBaseUrl(b.base_url) : "";
+  const apiKey = typeof b.api_key === "string" ? b.api_key.trim() : "";
+  if (!isValidServiceSlug(slug)) {
+    return c.json({ error: { message: "服务名须为小写字母/数字/连字符（1-32 字符），如 2api", type: "invalid_request_error" } }, 400);
+  }
+  if (!baseUrl) {
+    return c.json({ error: { message: "base_url 须为 http(s) 地址，如 https://ai.example.com/v1", type: "invalid_request_error" } }, 400);
+  }
+  if (!apiKey) {
+    return c.json({ error: { message: "api_key 不能为空", type: "invalid_request_error" } }, 400);
+  }
+  const existing = await customServiceBaseUrl(c.env, slug);
+  if (existing !== null && existing !== baseUrl) {
+    return c.json({ error: { message: `服务名 ${slug} 已存在，对应另一个地址（${existing}）`, type: "invalid_request_error" } }, 400);
+  }
+  const result = await addCustomKey(c.env, { slug, baseUrl, apiKey });
+  return c.json({ added: result.added, duplicate: result.duplicate, id: result.id, slug, base_url: baseUrl });
 });
 
 // POST /keys/add — JSON { provider, api_key, models[] }: import one key and
@@ -325,12 +403,23 @@ app.post("/keys/add", async (c) => {
   if (!isProvider(provider) || !api_key) {
     return c.json({ error: { message: "unknown provider or empty api_key", type: "invalid_request_error" } }, 400);
   }
+  // A custom service needs a base URL, which this endpoint doesn't take —
+  // use POST /keys/custom (Key 池「添加自定义服务」) instead.
+  if (provider === "custom") {
+    return c.json({ error: { message: "自定义服务需要 base_url：请用 Key 池「添加自定义服务」", type: "invalid_request_error" } }, 400);
+  }
   const selected = Array.isArray(b.models) ? b.models.filter((m): m is string => typeof m === "string") : [];
   const result = await importKeys(c.env, [{ provider: provider as Provider, api_key }]);
   // The old code marked every model NOT in `selected` unavailable GLOBALLY
   // (setModelStatus) — importing one key with a subset silently blocked those
-  // models for every other key of the provider too. Model selection is now
-  // recorded nowhere global; `blocked` stays [] to keep the response shape.
+  // models for every other key of the provider too. Only the SELECTED models
+  // are recorded now (available=1, same as POST /keys/:id/models); the rest
+  // are left untouched. `blocked` stays [] to keep the response shape.
+  for (const m of selected) {
+    const id = m.trim();
+    if (!id || /\s/.test(id) || id.length > 200) continue;
+    await setModelStatus(c.env, id, provider, true, null);
+  }
   const blocked: string[] = [];
   return c.json({ added: result.added, duplicate: result.duplicate, provider, selected, blocked });
 });
@@ -675,8 +764,19 @@ app.post("/keys/:id/chat", async (c) => {
   if (!body || !Array.isArray(body.messages)) {
     return c.json({ error: { message: "messages required", type: "invalid_request_error" } }, 400);
   }
-  const adapter = getAdapter(row.provider);
-  const model = typeof body.model === "string" && body.model ? body.model : adapter.models()[0];
+  // Custom keys need their base URL; the default model is the service's
+  // first added model (no static list exists for custom).
+  let adapter = getAdapter(row.provider);
+  let model = typeof body.model === "string" && body.model ? body.model : undefined;
+  if (row.provider === "custom") {
+    adapter = makeCustomAdapter(row.base_url ?? "");
+    if (!model && row.service_slug) model = (await firstCustomModel(c.env, row.service_slug)) ?? undefined;
+  } else if (!model) {
+    model = adapter.models()[0];
+  }
+  if (!model) {
+    return c.json({ error: { message: "no model: pass { model } or add a model to this key first", type: "invalid_request_error" } }, 400);
+  }
   const max_tokens = typeof body.max_tokens === "number" ? body.max_tokens : 256;
   const req: OpenAIChatRequest = {
     model,
@@ -714,7 +814,7 @@ app.post("/keys/:id/check", async (c) => {
   const row = await getKeyById(c.env, id);
   if (!row) return c.json({ error: { message: "key not found", type: "not_found" } }, 404);
 
-  const result = await probeKey(row.provider, row.api_key);
+  const result = await probeKey(row.provider, row.api_key, await probeOptsForKey(c.env, row));
   // A successful check brings a disabled/cooled key back into rotation AND clears
   // any stale last_error (so a "可用" key no longer shows an old error).
   if (result.alive && !result.rateLimited) {

@@ -2,7 +2,7 @@
 
 import type { Env } from "./types";
 import { reviveExpiredCooldowns, listDisabledForProbe, reactivateKey, setKeyBalance, setKeyProjectId } from "./db";
-import { probeKey } from "./probe";
+import { probeKey, probeOptsForKey } from "./probe";
 
 /** Default minutes between cron probes of a single disabled key. */
 const DEFAULT_PROBE_INTERVAL_MINUTES = 60;
@@ -66,7 +66,7 @@ export async function runHealthCheck(
   for (const key of candidates) {
     probed++;
     try {
-      const r = await probeKey(key.provider, key.api_key);
+      const r = await probeKey(key.provider, key.api_key, await probeOptsForKey(env, key));
       if (r.projectId) await setKeyProjectId(env, key.id, r.projectId);
       if (r.balance && r.balance.remaining != null) {
         await setKeyBalance(env, key.id, r.balance.remaining, r.balance.unit);

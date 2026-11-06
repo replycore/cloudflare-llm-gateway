@@ -60,6 +60,7 @@ const PROVIDER_PREFIXES: Provider[] = [
   "cohere",
   "elevenlabs",
   "stability",
+  "custom",
 ];
 
 /** Map an OpenAI `model` string to the provider that should serve it. */
@@ -125,6 +126,10 @@ export const FALLBACK_MODEL: Record<Provider, string> = {
   // passthrough-only providers: no chat model, never used as a chat fallback.
   elevenlabs: "",
   stability: "",
+  // custom services have no single fallback model: each service's models
+  // are user-added, so the fallback chain skips custom (like the
+  // passthrough-only providers above). Explicit and auto requests still work.
+  custom: "",
 };
 
 /**
@@ -150,6 +155,7 @@ export const MAX_OUTPUT_TOKENS: Record<Provider, number> = {
   cohere: 4096,
   elevenlabs: 4096,
   stability: 4096,
+  custom: 8192,
 };
 
 /** Per-model caps that differ from the provider's (thinking models spend
@@ -170,7 +176,38 @@ export function stripProviderPrefix(model: string): string {
   const colon = (model || "").indexOf(":");
   if (colon > 0) {
     const p = model.slice(0, colon).toLowerCase();
-    if ((PROVIDER_PREFIXES as string[]).includes(p)) return model.slice(colon + 1);
+    if ((PROVIDER_PREFIXES as string[]).includes(p)) {
+      // Custom services carry TWO segments ("custom:<slug>:<model>"): the
+      // slug is routing, not part of the upstream model id.
+      if (p === "custom") {
+        const second = model.indexOf(":", colon + 1);
+        return second > 0 ? model.slice(second + 1) : model;
+      }
+      return model.slice(colon + 1);
+    }
   }
   return model;
+}
+
+/** Service slug of a custom model id ("custom:2api:gpt-4o" -> "2api"), else null. */
+export function customServiceSlug(model: string): string | null {
+  const m = model || "";
+  if (!m.toLowerCase().startsWith("custom:")) return null;
+  const rest = m.slice("custom:".length);
+  const colon = rest.indexOf(":");
+  const slug = colon >= 0 ? rest.slice(0, colon) : rest;
+  return slug ? slug : null;
+}
+
+/** Plain model id of a custom model id ("custom:2api:gpt-4o" -> "gpt-4o"), else null. */
+export function customPlainModel(model: string): string | null {
+  const slug = customServiceSlug(model);
+  if (!slug) return null;
+  const rest = model.slice("custom:".length + slug.length + 1);
+  return rest ? rest : null;
+}
+
+/** Build a custom model id from a service slug and a plain model id. */
+export function customModelId(slug: string, plain: string): string {
+  return `custom:${slug}:${plain}`;
 }

@@ -86,7 +86,7 @@ function handle(provider: Provider): (c: Context<AppEnv>) => Promise<Response> {
         res = await callWithPool(
           c.env,
           provider,
-          (key: string) => getAdapter(provider).passthrough(subPath, req, key),
+          (row) => getAdapter(provider).passthrough(subPath, req, row.api_key),
           { model: billModel, tokenId: caller.tokenId, ownerSub: caller.ownerSub, ctx: c.executionCtx, onStreamCharged: releaseHold }
         );
       } catch (err) {

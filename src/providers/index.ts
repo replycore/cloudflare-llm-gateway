@@ -18,6 +18,7 @@ import ai21 from "./ai21";
 import cohere from "./cohere";
 import elevenlabs from "./elevenlabs";
 import stability from "./stability";
+import custom from "./custom";
 
 /** Return the adapter that serves `provider`. Throws on an unknown provider. */
 export function getAdapter(provider: Provider): ProviderAdapter {
@@ -54,6 +55,10 @@ export function getAdapter(provider: Provider): ProviderAdapter {
       return elevenlabs;
     case "stability":
       return stability;
+    case "custom":
+      // Placeholder only (models() is empty; chat/passthrough throw). Real
+      // custom traffic builds its adapter per key via makeCustomAdapter.
+      return custom;
     default: {
       // Exhaustiveness guard: if `Provider` grows, tsc flags this branch.
       const exhaustive: never = provider;

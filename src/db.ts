@@ -73,13 +73,89 @@ export async function importKeys(
  *  to MAX_KEY_RETRIES keys, so pulling the whole active set (which could be tens
  *  of thousands of rows) would be pure waste. 32 leaves ample retry headroom. */
 const ACTIVE_KEY_BATCH = 32;
-export async function listActiveKeys(env: Env, provider: Provider): Promise<ApiKeyRow[]> {
+export async function listActiveKeys(env: Env, provider: Provider, slug?: string): Promise<ApiKeyRow[]> {
+  // For custom services the pool must NOT mix services: keys of different
+  // slugs are different upstreams. `slug` narrows the pick to one service.
+  if (slug) {
+    const res = await env.DB.prepare(
+      `SELECT * FROM keypool_gateway_api_keys WHERE provider = ? AND service_slug = ? AND status = 'active' ORDER BY RANDOM() LIMIT ?`
+    )
+      .bind(provider, slug, ACTIVE_KEY_BATCH)
+      .all();
+    return (res.results ?? []) as unknown as ApiKeyRow[];
+  }
   const res = await env.DB.prepare(
     `SELECT * FROM keypool_gateway_api_keys WHERE provider = ? AND status = 'active' ORDER BY RANDOM() LIMIT ?`
   )
     .bind(provider, ACTIVE_KEY_BATCH)
     .all();
   return (res.results ?? []) as unknown as ApiKeyRow[];
+}
+
+/** One active key row for a provider (and, for custom services, one service
+ * slug). Full row — callers need base_url / service_slug for custom keys. */
+export async function oneActiveKeyRow(env: Env, provider: Provider, slug?: string): Promise<ApiKeyRow | null> {
+  const row = slug
+    ? await env.DB.prepare(
+        `SELECT * FROM keypool_gateway_api_keys WHERE provider = ? AND service_slug = ? AND status = 'active' LIMIT 1`
+      )
+        .bind(provider, slug)
+        .first<ApiKeyRow>()
+    : await env.DB.prepare(
+        `SELECT * FROM keypool_gateway_api_keys WHERE provider = ? AND status = 'active' LIMIT 1`
+      )
+        .bind(provider)
+        .first<ApiKeyRow>();
+  return row ?? null;
+}
+
+/** Insert one custom-service key. Returns the new row id (or the existing
+ * row's id on duplicate, so the UI can still open that key's model list). */
+export async function addCustomKey(
+  env: Env,
+  entry: { slug: string; baseUrl: string; apiKey: string }
+): Promise<{ added: number; duplicate: number; id: number | null }> {
+  const now = Date.now();
+  const res = await env.DB.prepare(
+    `INSERT OR IGNORE INTO keypool_gateway_api_keys (provider, api_key, base_url, service_slug, status, consecutive_fails, total_requests, total_fails, last_error, last_used_at, cooldown_until, disabled_reason, created_at)
+     VALUES ('custom', ?, ?, ?, 'active', 0, 0, 0, NULL, NULL, NULL, NULL, ?)`
+  )
+    .bind(entry.apiKey, entry.baseUrl, entry.slug, now)
+    .run();
+  const changes = res.meta?.changes ?? 0;
+  if (changes > 0) {
+    const lastRowId = (res.meta as { last_row_id?: unknown } | undefined)?.last_row_id;
+    return { added: 1, duplicate: 0, id: typeof lastRowId === "number" ? lastRowId : null };
+  }
+  const row = await env.DB.prepare(
+    `SELECT id FROM keypool_gateway_api_keys WHERE provider = 'custom' AND api_key = ?`
+  )
+    .bind(entry.apiKey)
+    .first<{ id: number }>();
+  return { added: 0, duplicate: 1, id: row ? row.id : null };
+}
+
+/** The stored base_url for a custom service slug (any key of that service),
+ * or null when the slug is unused. Used to reject a slug reused with a
+ * different address. */
+export async function customServiceBaseUrl(env: Env, slug: string): Promise<string | null> {
+  const row = await env.DB.prepare(
+    `SELECT base_url FROM keypool_gateway_api_keys WHERE provider = 'custom' AND service_slug = ? LIMIT 1`
+  )
+    .bind(slug)
+    .first<{ base_url: string | null }>();
+  return row ? row.base_url : null;
+}
+
+/** First available model id for a custom service slug (full
+ * `custom:<slug>:<model>` id), or null when the service has no added model. */
+export async function firstCustomModel(env: Env, slug: string): Promise<string | null> {
+  const row = await env.DB.prepare(
+    `SELECT model FROM keypool_gateway_model_status WHERE provider = 'custom' AND model LIKE ? AND available = 1 ORDER BY model ASC LIMIT 1`
+  )
+    .bind(`custom:${slug}:%`)
+    .first<{ model: string }>();
+  return row ? row.model : null;
 }
 
 /** Providers that currently have at least one active key (for the model list). */
