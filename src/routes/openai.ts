@@ -2,9 +2,7 @@
 
 import { Hono } from "hono";
 import type { Env } from "../types";
-import { PROVIDERS } from "../types";
 import type { OpenAIChatRequest } from "../providers/types";
-import { getAdapter } from "../providers";
 import { requireUser, resolveCaller } from "../auth";
 import { checkTokenLimits, providersWithActiveKeys, availableModelSet, listAvailableModels, getBalanceMicro, getChargeTotalMicro } from "../db";
 import { serveChat, AUTO_MODEL } from "../chat";
@@ -19,8 +17,12 @@ const app = new Hono<{ Bindings: Env }>();
 
 app.use("*", requireUser);
 
-/** Models a caller can actually be served right now: the provider has ≥1
- *  active key and the model isn't marked unavailable. Shared with /v1beta. */
+/** Models a caller can actually be served right now: the virtual "auto"
+ *  model (if any provider has an active key) plus the models the user added
+ *  via live fetch (`model_status` available=1), for providers with an active
+ *  key. Deliberately NOT the static adapter lists: those ids are hardcoded,
+ *  and listing them as servable when they were never added (or were blocked
+ *  and their rows deleted) would advertise models that can't serve. */
 export async function servableModels(env: Env): Promise<Array<{ id: string; owner: string }>> {
   const avail = await providersWithActiveKeys(env);
   // BLOCKED set: models explicitly marked unavailable (a never-probed model is
@@ -29,13 +31,6 @@ export async function servableModels(env: Env): Promise<Array<{ id: string; owne
   const out: Array<{ id: string; owner: string }> = [];
   // Virtual "auto" model first: routed to whichever provider can serve now.
   if (avail.size) out.push({ id: AUTO_MODEL, owner: "keypool" });
-  for (const provider of PROVIDERS) {
-    if (!avail.has(provider)) continue;
-    for (const id of getAdapter(provider).models()) {
-      if (blocked.has(id)) continue;
-      out.push({ id, owner: provider });
-    }
-  }
   // Models added from a live fetch (POST /admin/keys/:id/models) live in
   // model_status with available=1 — the static adapter lists can't know
   // them, but chat can already serve them (routing is provider-agnostic),

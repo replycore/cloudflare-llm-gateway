@@ -22,6 +22,7 @@ import {
   refundBalance,
   priceForModel,
   availableModelSet,
+  listAvailableModels,
 } from "./db";
 import { applyReasoning, canReason, normalizeChatRequest, normalizeReasoningResponse, normEffort } from "./reasoning";
 
@@ -62,28 +63,45 @@ const AUTO_RANK: string[] = [
   "llama-3.1-8b-instant",
 ];
 
-/** Providers to try for "auto", each with its best servable model, best first. */
-async function autoCandidates(
+/** Providers to try for "auto", each with its best servable model, best first.
+ *  Candidates come only from the models the user added via live fetch
+ *  (`model_status` available=1) — never the static adapter lists, so a
+ *  hardcoded model that was blocked and had its row deleted can never be
+ *  picked for "auto" again. A provider with an active key but no added
+ *  models falls back to its FALLBACK_MODEL (if not blocked), preserving
+ *  "auto" for freshly added keys. */
+export async function autoCandidates(
   env: Env,
   avail: Set<string>,
   wantReasoning: boolean
 ): Promise<Array<{ p: Provider; model: string }>> {
   const blocked = await availableModelSet(env);
+  const added = await listAvailableModels(env);
+  const byProvider = new Map<string, string[]>();
+  for (const row of added) {
+    if (!avail.has(row.provider)) continue;
+    const list = byProvider.get(row.provider) ?? [];
+    list.push(row.model);
+    byProvider.set(row.provider, list);
+  }
+  const rankOf = (m: string): number => {
+    let r = AUTO_RANK.indexOf(m);
+    // Asked to think: models that can think go ahead of those that can't.
+    if (r >= 0 && wantReasoning && !canReason(m)) r += AUTO_RANK.length;
+    // Not in AUTO_RANK: sort after every ranked model, deterministically.
+    return r >= 0 ? r : AUTO_RANK.length * 2;
+  };
   const best = new Map<Provider, { model: string; rank: number }>();
   for (const p of PROVIDERS) {
     if (!avail.has(p)) continue;
-    const models = getAdapter(p).models().filter((m) => m && !blocked.has(m));
     let pick: { model: string; rank: number } | null = null;
-    for (const m of models) {
-      let r = AUTO_RANK.indexOf(m);
-      // Asked to think: models that can think go ahead of those that can't.
-      if (r >= 0 && wantReasoning && !canReason(m)) r += AUTO_RANK.length;
-      if (r >= 0 && (!pick || r < pick.rank)) pick = { model: m, rank: r };
+    for (const m of byProvider.get(p) ?? []) {
+      const r = rankOf(m);
+      if (!pick || r < pick.rank || (r === pick.rank && m < pick.model)) pick = { model: m, rank: r };
     }
     if (!pick) {
       const fb = FALLBACK_MODEL[p];
       if (fb && !blocked.has(fb)) pick = { model: fb, rank: AUTO_RANK.length };
-      else if (models.length) pick = { model: models[0], rank: AUTO_RANK.length };
     }
     if (pick) best.set(p, pick);
   }

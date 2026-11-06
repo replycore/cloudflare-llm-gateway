@@ -315,11 +315,14 @@ export function sweepProgress(env: Env): Promise<{ total: number; due: number }>
 }
 
 /**
- * Probe model-level availability in two passes, capped at 24 upstream calls:
- *   1. the models the user added via the key list (`model_status` rows) — the
- *      ones /v1/models actually serves. Available rows first (confirm they're
- *      still alive), blocked rows after (a revived model comes back).
- *   2. the static per-provider catalog, skipping anything already probed.
+ * Probe model-level availability for the models the user added via the key
+ * list (`model_status` rows) — the ones /v1/models actually serves.
+ * Available rows first (confirm they're still alive), blocked rows after
+ * (a revived model comes back). Capped at 24 upstream calls.
+ * Deliberately NOT the static per-provider catalog: the catalog ids are
+ * hardcoded, and probing them recreated the same three blocked rows
+ * (deepseek/llama/auto on a 0-balance OpenRouter account) in the
+ * availability UI every run. Only user-added models are probed.
  * A 1-token chat: 2xx or 429 means the model itself works (just throttled);
  * any other non-2xx marks it unavailable with a reason snippet (e.g. glm
  * '余额不足/无资源包', or a 404/400 model-not-found). Each call is isolated
@@ -362,7 +365,8 @@ export async function probeModels(env: Env): Promise<{ checked: number; blocked:
     }
   };
 
-  // Pass 1: user-added models first — available before blocked.
+  // Only user-added models — available before blocked. Never the static
+  // catalog: probing it recreated hardcoded rows in the availability UI.
   const rows = await listModelStatus(env);
   rows.sort(
     (a, b) =>
@@ -376,14 +380,5 @@ export async function probeModels(env: Env): Promise<{ checked: number; blocked:
     await probeOne(row.provider as Provider, row.model);
   }
 
-  // Pass 2: static catalog, skipping anything already probed this run.
-  for (const provider of PROVIDERS) {
-    if (checked >= MAX_CALLS) break;
-    if (!(await keyFor(provider))) continue;
-    for (const model of getAdapter(provider).models()) {
-      if (checked >= MAX_CALLS) break;
-      await probeOne(provider, model);
-    }
-  }
   return { checked, blocked };
 }
