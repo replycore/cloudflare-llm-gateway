@@ -1,20 +1,18 @@
 /**
  * Self-contained, role-routed console served at GET /.
  *
- * Visual language: a hand-drawn / neo-brutalist
- * "sketchbook" theme: warm cream background with a dotted grid, white cards with
- * bold black borders and wobbly irregular border-radii, ZCOOL KuaiLe + Permanent
- * Marker display fonts, bright red accent, and an SVG roughen filter on dots.
+ * Visual language: iOS 27 (Liquid Glass) — frosted glass surfaces,
+ * pastel gradients, SF Pro system font stack, large rounded corners.
+ * Supports light/dark via prefers-color-scheme + manual toggle (localStorage).
  *
- * The page boots by calling /auth/me (cookie auto-sent, same-origin) and routes
- * into one of four surfaces by role/status:
- *   1. not logged in  -> landing with a 「登录」 button
+ * The page boots by calling /auth/me and routes into one of four surfaces:
+ *   1. not logged in -> landing with a 「登录」 button / token login
  *   2. user + pending/blocked -> 「账号待开通」 card
  *   3. user + approved -> consumer console (控制台 · 我的令牌 · 模型 · 文档)
  *   4. admin -> admin console (总览 · Key 池 · 用户 · 令牌 · 文档)
  *
- * Every API call is a same-origin fetch carrying the SSO session cookie. The
- * browser NEVER sends an Authorization header.
+ * Every API call is a same-origin fetch carrying the session cookie or,
+ * when token login is used, the Authorization: Bearer header.
  */
 
 /** Operator-configurable branding (set via wrangler [vars]; all optional). */
@@ -52,116 +50,126 @@ const PAGE = String.raw`<!doctype html>
 <link href="https://fonts.googleapis.com/css2?family=ZCOOL+KuaiLe&family=Permanent+Marker&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet">
 <style>
   :root{
-    --ink:#1a1a1a; --cream:#fcfbf4; --paper:#fff;
-    --red:#ff5447; --blue:#3f6fe0; --green:#36a85b; --yellow:#ffd23d; --amber:#e0a32a;
-    --mint:#d8f0df; --peach:#ffe0cc; --softblue:#dde7ff; --creamy:#fff0bf;
-    --muted:#57564d; --faint:#8a887d;
-    --marker:'Permanent Marker',cursive;
-    --zcool:'ZCOOL KuaiLe',cursive;
-    --sans:'Noto Sans SC','PingFang SC',system-ui,-apple-system,sans-serif;
+    --ink:#1a1a1a; --bg:#f5f5f7; --glass:rgba(255,255,255,0.72); --glass-strong:rgba(255,255,255,0.88); --glass-border:rgba(0,0,0,0.08);
+    --red:#ff3b30; --blue:#007aff; --green:#34c759; --yellow:#ffcc00; --amber:#ff9500; --teal:#32ade6;
+    --mint:#eef7f2; --peach:#fff3ef; --softblue:#f0f6ff; --creamy:#fffdf5;
+    --muted:#6e6e73; --faint:#8a8a8e; --red-bg:#fff5f5; --blue-bg:#f0f9ff; --green-bg:#f2fbf5; --yellow-bg:#fffbf0;
+    --sans:-apple-system,BlinkMacSystemFont,"SF Pro Display","SF Pro Text","Helvetica Neue","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+    --mono:ui-monospace,Menlo,SFMono-Regular,monospace;
+    --radius:20px; --radius-lg:28px; --radius-sm:12px;
+    --shadow:0 8px 32px rgba(0,0,0,0.08), 0 1px 3px rgba(0,0,0,0.06);
+    --shadow-lg:0 16px 48px rgba(0,0,0,0.12), 0 4px 16px rgba(0,0,0,0.08);
+  }
+  [data-theme="dark"]{
+    --ink:#f5f5f7; --bg:#151517; --glass:rgba(44,44,46,0.66); --glass-strong:rgba(56,56,58,0.88); --glass-border:rgba(255,255,255,0.1);
+    --mint:#1a2e22; --peach:#2e1f18; --softblue:#16263d; --creamy:#2c2410;
+    --muted:#a1a1a6; --faint:#7c7c81; --red-bg:#2b1414; --blue-bg:#0a1a2a; --green-bg:#0a2618; --yellow-bg:#221a08;
+    --shadow:0 8px 32px rgba(0,0,0,0.4), 0 1px 3px rgba(0,0,0,0.3);
+    --shadow-lg:0 16px 48px rgba(0,0,0,0.5), 0 4px 16px rgba(0,0,0,0.4);
   }
   *{box-sizing:border-box}
   html,body{margin:0}
   body{
-    background-color:var(--cream);
-    background-image:radial-gradient(rgba(0,0,0,.05) 1.4px,transparent 1.4px);
-    background-size:22px 22px;
-    color:var(--ink); font-family:var(--sans); font-size:15px; line-height:1.6;
-    -webkit-font-smoothing:antialiased;
+    background:var(--bg);
+    background-image:linear-gradient(135deg, rgba(0,122,255,0.06) 0%, rgba(52,199,89,0.04) 40%, rgba(255,149,0,0.04) 100%);
+    color:var(--ink); font-family:var(--sans); font-size:15px; line-height:1.55;
+    -webkit-font-smoothing:antialiased; transition:background 0.3s, color 0.3s;
   }
+  [data-theme="dark"] body{background-image:linear-gradient(135deg, rgba(0,122,255,0.08) 0%, rgba(52,199,89,0.05) 40%, rgba(255,149,0,0.05) 100%);}
   .wrap{max-width:880px; margin:0 auto; padding:26px clamp(16px,4vw,32px) 60px}
-  header.top{display:flex; align-items:center; gap:14px; margin-bottom:8px}
-  .logo-dot{width:26px; height:26px; border:2.5px solid var(--ink); background:var(--red);
-    border-radius:55% 45% 60% 40%; filter:url(#roughHi); flex:none}
-  h1{font-family:var(--zcool); font-weight:400; font-size:clamp(28px,5vw,42px); margin:0; line-height:1.15}
-  .tagline{font-family:var(--marker); color:var(--faint); font-size:15px; margin:2px 0 22px; transform:rotate(-1.2deg)}
-  .pill{display:inline-flex; align-items:center; gap:7px; font-family:var(--marker); font-size:13px;
-    border:2px solid var(--ink); border-radius:11px 14px 10px 13px/13px 10px 14px 11px; padding:3px 12px; background:var(--paper)}
-  .pill .pd{width:11px;height:11px;border-radius:55% 45% 60% 40%;border:1.5px solid var(--ink);filter:url(#roughHi)}
+  header.top{display:flex; align-items:center; gap:14px; margin-bottom:10px}
+  .logo-dot{width:32px; height:32px; border-radius:9px; background:linear-gradient(135deg,#ff3b30,#ff9500); flex:none; box-shadow:0 2px 8px rgba(255,59,48,0.3)}
+  h1{font-family:var(--sans); font-weight:700; font-size:clamp(28px,5vw,42px); margin:0; line-height:1.1; letter-spacing:-0.02em}
+  .tagline{font-family:var(--sans); color:var(--faint); font-size:14px; margin:2px 0 24px; font-weight:400}
+  .theme-toggle{display:inline-flex; align-items:center; gap:6px; margin-left:auto; font-family:var(--sans); font-size:13px; font-weight:600; border-radius:10px; padding:6px 12px; border:1px solid var(--glass-border); background:var(--glass); backdrop-filter:blur(16px) saturate(160%); cursor:pointer; color:var(--ink)}
+  .theme-toggle:hover{background:var(--glass-strong)}
+  .pill{display:inline-flex; align-items:center; gap:7px; font-family:var(--sans); font-weight:600; font-size:13px;
+    border-radius:980px; border:1px solid var(--glass-border); padding:5px 12px; background:var(--glass); backdrop-filter:blur(16px) saturate(160%)}
+  .pill .pd{width:8px;height:8px;border-radius:50%}
   .pill.ok .pd{background:var(--green)} .pill.bad .pd{background:var(--red)} .pill .pd{background:var(--faint)}
-  .card{background:var(--paper); border:2.5px solid var(--ink); padding:18px 20px; margin:16px 0;
-    border-radius:18px 22px 15px 20px/20px 15px 22px 18px}
-  .card.r1{border-radius:14px 17px 11px 15px/15px 11px 17px 14px}
-  .card.r2{border-radius:20px 15px 22px 16px/16px 22px 14px 20px}
-  .card h2{font-family:var(--zcool); font-weight:400; font-size:21px; margin:0 0 14px; display:flex; align-items:center; gap:9px}
-  .card h2 .hd{width:14px;height:14px;border:2px solid var(--ink);border-radius:55% 45% 60% 40%;filter:url(#roughHi);flex:none}
+  .card{background:var(--glass); backdrop-filter:blur(20px) saturate(160%); -webkit-backdrop-filter:blur(20px) saturate(160%);
+    border:1px solid var(--glass-border); padding:22px 24px; margin:16px 0;
+    border-radius:var(--radius-lg); box-shadow:var(--shadow); transition:background 0.3s, border 0.3s}
+  .card.r1,.card.r2{border-radius:var(--radius-lg)}
+  .card h2{font-family:var(--sans); font-weight:700; font-size:20px; margin:0 0 16px; display:flex; align-items:center; gap:8px; letter-spacing:-0.01em}
+  .card h2 .hd{width:10px;height:10px; border-radius:50%; flex:none}
   .h-red .hd{background:var(--red)} .h-blue .hd{background:var(--blue)} .h-green .hd{background:var(--green)} .h-yellow .hd{background:var(--yellow)}
-  label{display:block; font-family:var(--marker); font-size:13px; color:var(--muted); margin-bottom:7px}
-  input,textarea,select{width:100%; background:var(--cream); color:var(--ink); border:2px solid var(--ink);
-    border-radius:10px 13px 9px 12px/12px 9px 13px 10px; padding:10px 13px; font-family:var(--sans); font-size:14px; outline:none}
-  input:focus,textarea:focus{background:#fff; border-color:var(--red)}
+  label{display:block; font-family:var(--sans); font-weight:600; font-size:13px; color:var(--muted); margin-bottom:8px}
+  input,textarea,select{width:100%; background:var(--glass-strong); backdrop-filter:blur(12px); color:var(--ink); border:1px solid var(--glass-border);
+    border-radius:var(--radius-sm); padding:11px 14px; font-family:var(--sans); font-size:15px; outline:none; transition:border 0.2s, box-shadow 0.2s}
+  input:focus,textarea:focus,select:focus{border-color:var(--blue); box-shadow:0 0 0 3px rgba(0,122,255,0.15)}
   textarea{resize:vertical; min-height:120px; line-height:1.5}
   .row{display:flex; gap:12px; align-items:flex-end; flex-wrap:wrap}
   .row > div{flex:1; min-width:180px}
-  .btn{font-family:var(--zcool); font-size:16px; border:2.5px solid var(--ink); cursor:pointer;
-    padding:9px 20px; border-radius:13px 16px 11px 14px/14px 11px 16px 13px; white-space:nowrap;
-    transition:transform .12s; box-shadow:3px 3px 0 var(--ink)}
-  .btn:active{transform:translate(2px,2px); box-shadow:1px 1px 0 var(--ink)}
-  .btn.primary{background:var(--red); color:#fff}
-  .btn.ghost{background:var(--paper); color:var(--ink)}
-  .btn.small{font-size:13px; padding:5px 13px; box-shadow:2px 2px 0 var(--ink)}
+  .btn{font-family:var(--sans); font-weight:600; font-size:15px; border:none; cursor:pointer;
+    padding:10px 20px; border-radius:12px; white-space:nowrap;
+    transition:transform 0.15s, box-shadow 0.15s, opacity 0.15s}
+  .btn:active{transform:scale(0.97)}
+  .btn.primary{background:linear-gradient(135deg,#007aff,#5ac8fa); color:#fff; box-shadow:0 4px 16px rgba(0,122,255,0.3)}
+  .btn.ghost{background:var(--glass); backdrop-filter:blur(12px); color:var(--ink); border:1px solid var(--glass-border)}
+  .btn.small{font-size:13px; padding:6px 14px; border-radius:10px}
   .btn:disabled{opacity:.5; cursor:not-allowed}
   table{width:100%; border-collapse:collapse; font-size:14px}
-  th,td{text-align:left; padding:9px 10px; border-bottom:1.5px dashed #cfcbbd}
-  th{font-family:var(--marker); font-weight:400; color:var(--muted); font-size:13px}
+  th,td{text-align:left; padding:10px 12px; border-bottom:1px solid var(--glass-border)}
+  th{font-family:var(--sans); font-weight:600; color:var(--muted); font-size:13px}
   td.n{font-variant-numeric:tabular-nums; font-weight:700}
-  .dot{display:inline-block; width:13px;height:13px; border:2px solid var(--ink); border-radius:55% 45% 60% 40%; filter:url(#roughHi); vertical-align:-1px; margin-right:6px}
-  .d-active{background:var(--green)} .d-cooldown{background:var(--yellow)} .d-disabled{background:var(--red)} .d-zero{background:#e8e6db}
+  .dot{display:inline-block; width:8px;height:8px; border-radius:50%; vertical-align:1px; margin-right:6px}
+  .d-active{background:var(--green)} .d-cooldown{background:var(--yellow)} .d-disabled{background:var(--red)} .d-zero{background:var(--faint)}
   .d-warn{background:var(--amber)}
-  .grid3{display:grid; grid-template-columns:repeat(3,1fr); gap:14px}
-  .stat{border:2px solid var(--ink); padding:14px 16px; border-radius:16px 12px 18px 13px/13px 18px 11px 16px}
-  .stat.s-a{background:var(--mint)} .stat.s-c{background:var(--creamy)} .stat.s-d{background:var(--peach)}
-  .stat .lbl{font-family:var(--marker); font-size:13px; color:var(--muted)}
-  .stat .num{font-family:var(--zcool); font-size:34px; line-height:1.1; margin-top:2px; font-variant-numeric:tabular-nums}
-  .out{background:var(--cream); border:2px dashed var(--ink); border-radius:12px; padding:11px 14px;
-    font-family:ui-monospace,Menlo,monospace; font-size:13px; white-space:pre-wrap; word-break:break-all; margin-top:13px}
+  .grid3{display:grid; grid-template-columns:repeat(3,1fr); gap:16px}
+  .stat{background:var(--glass); backdrop-filter:blur(16px); border:1px solid var(--glass-border); padding:18px 20px; border-radius:var(--radius); box-shadow:var(--shadow)}
+  .stat.s-a{border-left:3px solid var(--green)} .stat.s-c{border-left:3px solid var(--yellow)} .stat.s-d{border-left:3px solid var(--amber)}
+  .stat .lbl{font-family:var(--sans); font-weight:600; font-size:13px; color:var(--muted)}
+  .stat .num{font-family:var(--sans); font-weight:700; font-size:32px; line-height:1.1; margin-top:4px; font-variant-numeric:tabular-nums; letter-spacing:-0.02em}
+  .out{background:var(--glass-strong); border:1px solid var(--glass-border); border-radius:var(--radius-sm); padding:12px 14px;
+    font-family:var(--mono); font-size:13px; white-space:pre-wrap; word-break:break-all; margin-top:13px}
   .out .k{color:var(--green); font-weight:700}
   .out .e{color:var(--red); font-weight:700}
-  .hint{color:var(--faint); font-size:12.5px; margin-top:9px}
-  .hint code{background:var(--creamy); border:1.5px solid var(--ink); border-radius:5px; padding:0 6px; font-family:ui-monospace,monospace}
-  .endpoint{font-family:ui-monospace,Menlo,monospace; font-size:13px; background:var(--softblue);
-    border:2px solid var(--ink); border-radius:9px; padding:8px 11px; word-break:break-all; margin-top:6px}
+  .hint{color:var(--faint); font-size:13px; margin-top:10px; line-height:1.5}
+  .hint code{background:var(--glass-strong); border:1px solid var(--glass-border); border-radius:6px; padding:1px 6px; font-family:var(--mono); font-size:12px}
+  .endpoint{font-family:var(--mono); font-size:13px; background:var(--glass-strong); border:1px solid var(--glass-border);
+    border-radius:10px; padding:10px 12px; word-break:break-all; margin-top:8px}
   @media(max-width:620px){.grid3{grid-template-columns:1fr}.btn{width:100%}}
 
   /* ===== role-routed layout: left sidebar nav (new-api style) + content ===== */
   .layout{display:flex; min-height:100vh; align-items:stretch}
-  .side{width:212px; flex:none; background:var(--paper); border-right:2.5px solid var(--ink);
+  .side{width:212px; flex:none; background:var(--glass); backdrop-filter:blur(20px) saturate(160%); -webkit-backdrop-filter:blur(20px) saturate(160%);
+    border-right:1px solid var(--glass-border);
     padding:22px 16px; display:flex; flex-direction:column; gap:5px}
   .side .brand{display:flex; align-items:center; gap:10px; margin-bottom:6px}
   .side .brand h1{font-size:25px}
-  .side .brand .logo-dot{width:24px;height:24px}
-  .side .subt{font-family:var(--marker); color:var(--faint); font-size:11.5px; margin:0 0 18px; transform:rotate(-1.2deg)}
-  .nav{display:flex; flex-direction:column; gap:5px}
-  .nav a{display:flex; align-items:center; gap:9px; font-family:var(--zcool); font-size:17px;
-    text-decoration:none; color:var(--ink); padding:8px 12px; border:2px solid transparent;
-    border-radius:11px 14px 10px 13px/13px 10px 14px 11px; cursor:pointer; user-select:none}
-  .nav a:hover{background:var(--cream)}
-  .nav a.active{background:var(--creamy); border-color:var(--ink); box-shadow:2px 2px 0 var(--ink)}
-  .nav a .hd{width:13px;height:13px;border:2px solid var(--ink);border-radius:55% 45% 60% 40%;filter:url(#roughHi);flex:none}
+  .side .brand .logo-dot{width:28px;height:28px; border-radius:8px}
+  .side .subt{font-family:var(--sans); color:var(--faint); font-size:12px; margin:0 0 18px; font-weight:500}
+  .nav{display:flex; flex-direction:column; gap:4px}
+  .nav a{display:flex; align-items:center; gap:9px; font-family:var(--sans); font-weight:600; font-size:16px;
+    text-decoration:none; color:var(--ink); padding:9px 14px; border-radius:12px; cursor:pointer; user-select:none; transition:background 0.15s}
+  .nav a:hover{background:var(--glass-strong)}
+  .nav a.active{background:var(--glass-strong); box-shadow:inset 0 0 0 1px var(--glass-border)}
+  .nav a .hd{width:8px;height:8px; border-radius:50%; flex:none}
   .nav a.c-red .hd{background:var(--red)} .nav a.c-blue .hd{background:var(--blue)}
   .nav a.c-green .hd{background:var(--green)} .nav a.c-yellow .hd{background:var(--yellow)}
   .nav a.c-amber .hd{background:var(--amber)}
   .side .spacer{flex:1}
-  .side .me-box{border-top:2px dashed #cfcbbd; padding-top:14px; font-size:13px; color:var(--muted)}
+  .side .me-box{border-top:1px solid var(--glass-border); padding-top:14px; font-size:13px; color:var(--muted)}
   .side .me-box .em{font-weight:700; color:var(--ink); word-break:break-all; display:block; margin-bottom:8px}
   .main{flex:1; min-width:0}
   .main .wrap{max-width:1080px; margin:0; padding-top:30px}
   .section{display:none}
   .section.active{display:block}
-  .sec-h{font-family:var(--zcool); font-size:clamp(24px,4vw,32px); margin:0 0 4px}
-  .sec-sub{font-family:var(--marker); color:var(--faint); font-size:13px; margin:0 0 18px; transform:rotate(-.6deg)}
-  .mono-token{font-family:ui-monospace,Menlo,monospace; font-size:13px; word-break:break-all}
-  .copyable{cursor:pointer; border-bottom:1.5px dashed var(--blue)}
-  .copyable:hover{color:var(--blue)}
-  .badge{display:inline-block; font-family:var(--marker); font-size:11px; border:1.5px solid var(--ink);
-    border-radius:8px; padding:1px 8px; vertical-align:1px}
+  .sec-h{font-family:var(--sans); font-weight:700; font-size:clamp(24px,4vw,32px); margin:0 0 4px; letter-spacing:-0.02em}
+  .sec-sub{font-family:var(--sans); color:var(--faint); font-size:13px; margin:0 0 18px; font-weight:500}
+  .mono-token{font-family:var(--mono); font-size:13px; word-break:break-all}
+  .copyable{cursor:pointer; color:var(--blue); border-bottom:1px dotted var(--blue)}
+  .copyable:hover{opacity:0.8}
+  .badge{display:inline-block; font-family:var(--sans); font-weight:600; font-size:11px;
+    border-radius:8px; padding:3px 8px; vertical-align:1px; background:var(--glass-strong); border:1px solid var(--glass-border)}
   .b-pending{background:var(--creamy)} .b-approved{background:var(--mint)} .b-blocked{background:var(--peach)}
-  tr.hot td{background:#fff7d6}
+  tr.hot td{background:var(--creamy)}
   /* centered single-card surfaces (landing / pending) */
   .center{max-width:560px; margin:0 auto; padding:60px clamp(16px,4vw,32px)}
-  @media(max-width:720px){
+  @media(max-width:820px){
     .layout{flex-direction:column}
-    .side{width:auto; border-right:none; border-bottom:2.5px solid var(--ink); flex-direction:row;
+    .side{width:auto; border-right:none; border-bottom:1px solid var(--glass-border); flex-direction:row;
       flex-wrap:wrap; align-items:center; gap:10px; padding:14px 16px}
     .side .brand{margin-bottom:0}
     .side .subt{display:none}
@@ -170,6 +178,76 @@ const PAGE = String.raw`<!doctype html>
     .side .spacer{flex:0}
     .side .me-box{border-top:none; padding-top:0; width:100%}
     .main .wrap{padding-top:18px}
+  }
+</style>
+<style>
+  /* ========== iOS native overlay (additive: only affects mobile content regions) ========== */
+  /* Large text + 44pt tap targets (Apple HIG) */
+  .section, .card, .sec-h, .sec-sub, .nav a, input, textarea, select, .btn, table, .hint, .pill, .stat {
+    -webkit-tap-highlight-color: transparent;
+  }
+  @media (max-width: 820px) {
+    :root { --radius-sm: 14px; --radius-md: 20px; --radius-lg: 26px; }
+    body { font-size: 16px; -webkit-text-size-adjust: 100%; padding-bottom: env(safe-area-inset-bottom); }
+    /* MOBILE iOS FIX: do NOT hide the brand — original order is [brand, nav, spacer, me-box].
+       We instead turn the whole aside into a narrow vertical rail at the bottom. */
+    .layout { flex-direction: column; position: relative; }
+    .side { position: relative; order: 2; top: auto; bottom: auto; width: 100%; border-top: 1px solid var(--glass-border); border-bottom: none; border-right: none;
+            border-radius: 0; padding: 10px 12px calc(10px + env(safe-area-inset-bottom)) !important; box-shadow: none;
+            flex-direction: row; flex-wrap: wrap; align-items: center; gap: 8px; min-height: 56px; }
+    .side .brand { display: flex; align-items: center; margin: 0 8px 0 0; }
+    .side .brand h1 { font-size: 17px; }
+    .side .brand .logo-dot { width: 26px; height: 26px; border-radius: 8px; }
+    .side .subt { display: none !important; }
+    .nav { display: grid !important; grid-auto-flow: column; grid-auto-columns: minmax(64px, 1fr); gap: 4px; flex: 1; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+    .nav::-webkit-scrollbar { display: none; }
+    .nav a { flex-direction: column; justify-content: center; align-items: center; gap: 2px; font-size: 11px; font-weight: 600; padding: 8px 4px 6px !important; min-height: 54px; text-align: center; border-radius: 12px !important; }
+    .nav a .hd { width: 8px; height: 8px; }
+    .nav a.active { background: var(--blue) !important; color: #fff !important; box-shadow: none !important; }
+    .nav a.active .hd { background: #fff !important; }
+    .nav a.active.c-red .hd, .nav a.active.c-blue .hd, .nav a.active.c-green .hd, .nav a.active.c-yellow .hd, .nav a.active.c-amber .hd { background: #fff !important; }
+    .side .spacer { display: none; }
+    .side .me-box { flex: 0 0 auto; width: auto; border-top: none; padding-top: 0; display: flex; align-items: center; gap: 6px; }
+    .side .me-box .em { display: none; }
+    .side .me-box .pill { font-size: 11px; padding: 4px 8px; }
+    .side .me-box .theme-toggle { width: auto !important; margin-top: 0 !important; min-height: 36px; font-size: 12px; padding: 6px 10px; }
+    .side .me-box .btn { width: auto !important; min-height: 36px; font-size: 13px; padding: 6px 12px; }
+    #preview-toggle { display: none !important; }
+    .main { order: 1; }
+    .wrap { padding: 16px 16px 24px !important; }
+    .main .wrap { padding-top: 12px !important; }
+    /* Login page: center card must not be clipped by the bottom-anchored II layout */
+    #view-landing.center { display: flex !important; flex-direction: column; align-items: center; }
+    #view-landing.center .top { width: 100%; display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
+    #view-landing.center .card { width: 100%; }
+    .card { padding: 18px 16px !important; box-shadow: 0 10px 28px rgba(0,0,0,0.12) !important; }
+    .card h2 { font-size: 18px; }
+    label { font-size: 15px; margin-top: 10px; }
+    input, textarea, select { font-size: 17px !important; min-height: 48px; border-radius: 14px !important; }
+    textarea { min-height: 110px; }
+    .btn, .btn.ghost, .btn.primary { min-height: 50px !important; font-size: 17px !important; width: 100% !important; padding: 14px 18px !important; border-radius: 16px !important; }
+    .btn.small { width: auto !important; min-height: 44px !important; font-size: 15px !important; }
+    #tok-row { display: flex; flex-direction: column; gap: 10px; }
+    #tok-row #tok-login { width: 100% !important; min-height: 52px !important; flex: none; }
+    #tok-row #tok-in { width: 100% !important; min-height: 52px !important; font-size: 17px !important; }
+    .theme-toggle { min-height: 44px; font-size: 14px; padding: 8px 14px; }
+    .grid3 { grid-template-columns: 1fr !important; gap: 10px; }
+    .stat { border-left: none; border-top: 3px solid var(--glass-border); }
+    .stat.s-a { border-top-color: var(--green); } .stat.s-c { border-top-color: var(--yellow); } .stat.s-d { border-top-color: var(--amber); }
+    .stat .num { font-size: 28px; }
+    table { font-size: 15px; }
+    .card table { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    th, td { padding: 14px 12px; white-space: nowrap; }
+    .sec-h { font-size: 28px; }
+    .sec-sub { font-size: 14px; margin-bottom: 12px; }
+    .center, .card.r1, .card.r2 { padding: 20px 16px !important; }
+    #modalAddKey { position: fixed !important; left: 50% !important; top: 50% !important; transform: translate(-50%,-50%) !important;
+      width: calc(100vw - 24px) !important; max-width: 560px !important; max-height: 86vh !important; overflow-y: auto !important; border-radius: 20px !important; }
+  }
+  @media (min-width: 821px) {
+    .layout { flex-direction: row; }
+    .side { position: sticky; height: fit-content; }
+    .main { order: 0; }
   }
 </style>
 <script defer src="https://blog.leeguoo.com/scripts/visitor-beacon.js?v=20260629-2"></script>
@@ -188,12 +266,17 @@ const PAGE = String.raw`<!doctype html>
   <header class="top">
     <span class="logo-dot"></span>
     <h1>__BRAND__</h1>
+    <button class="theme-toggle" id="theme-toggle-landing" aria-label="切换主题">🌗 主题</button>
   </header>
   <div class="tagline">// 把一堆 AI key 攒成一个稳定的接口 · 坏了自动下架</div>
   <div class="card r1">
     <h2 class="h-red"><span class="hd"></span>登录</h2>
     <p style="margin:0 0 16px; color:var(--muted)">一个 OpenAI 兼容的 AI 网关。登录后即可申请 API 令牌。</p>
     <button class="btn primary" onclick="location.href='/auth/login'">__SSO_LABEL__</button>
+    <div id="tok-row" style="margin:14px 0 4px; display:flex; gap:8px">
+      <input id="tok-in" type="text" placeholder="粘贴管理员 Token 登录" style="flex:1; min-width:0; padding:10px 12px; border:1px solid var(--glass-border); border-radius:12px; background:var(--glass-strong); color:var(--ink)" />
+      <button class="btn" id="tok-login" style="flex:none; width:auto">登录</button>
+    </div>
     <div class="hint">__SSO_NOTE__</div>
   </div>
   <div class="card r2" id="landing-models" style="display:none">
@@ -235,6 +318,7 @@ const PAGE = String.raw`<!doctype html>
       <span class="em" id="me-email"></span>
       <span class="pill" id="me-rolepill"><span class="pd"></span><span id="me-role"></span></span>
       <a href="/auth/logout" class="btn ghost small" style="text-decoration:none; margin-left:6px">退出</a>
+      <button class="theme-toggle" id="theme-toggle-side" aria-label="切换主题" style="margin-top:8px; width:100%; justify-content:center">🌗 主题</button>
     </div>
   </aside>
 
@@ -456,7 +540,23 @@ const PAGE = String.raw`<!doctype html>
           <h2 class="h-yellow"><span class="hd"></span>导入 key</h2>
           <label>provider:key — 一行一个</label>
           <textarea id="keys" spellcheck="false" placeholder="gemini:AIzaSy...&#10;openrouter:sk-or-v1-...&#10;mistral:..."></textarea>
-          <div style="margin-top:13px"><button class="btn primary" id="importBtn">导入并自动上架</button></div>
+          <div style="margin-top:13px"><button class="btn primary" id="importBtn">导入并自动上架</button><button class="btn primary" id="importSelectBtn" style="margin-left:8px;">导入并选择模型</button></div>
+<div class="out" id="importOut" style="display:none"></div>
+<div id="modalAddKey" class="card" style="display:none; position:fixed; top:10%; left:50%; transform:translateX(-50%); z-index:1000; width:90%; max-width:500px;">
+  <h2 class="h-green"><span class="hd"></span>导入并选择模型</h2>
+  <label>提供商</label>
+  <select id="addProvider"></select>
+  <label>API Key</label>
+  <input id="addKey" type="password" placeholder="粘贴 API Key"/>
+  <label style="margin-top:10px;">搜索模型</label>
+  <input id="modelSearch" type="text" placeholder="输入模型名过滤（模糊匹配）"/>
+  <div id="modelList" style="margin-top:10px; max-height:200px; overflow:auto;"></div>
+  <div id="modelCount" class="hint" style="margin-top:6px"></div>
+  <div style="margin-top:10px; display:flex; gap:10px;">
+    <button class="btn primary" id="addConfirm">确认导入</button>
+    <button class="btn ghost" id="addCancel">取消</button>
+  </div>
+</div>
           <div class="hint">支持 <code>gemini</code> <code>openai</code> <code>mistral</code> <code>openrouter</code> <code>deepseek</code> <code>groq</code> <code>moonshot</code> <code>glm</code> <code>qwen</code> <code>deepinfra</code> <code>fireworks</code> <code>cerebras</code> <code>ai21</code> <code>cohere</code> <code>elevenlabs</code> <code>stability</code>。重复自动跳过；坏 key 首次调用即自动禁用。</div>
           <div class="out" id="importOut" style="display:none"></div>
         </div>
@@ -770,10 +870,14 @@ const PAGE = String.raw`<!doctype html>
   var me = null;        // { email, role, status, sub }
   var modelsCache = null;
 
-  // ---- same-origin fetch. Cookie auth only — NEVER an Authorization header. ----
+  // ---- same-origin fetch. Cookie auth first; token login stored in localStorage ----
   function api(path, opts){
     opts = opts || {};
     opts.credentials = 'same-origin';
+    opts.headers = Object.assign({}, opts.headers||{});
+    var tk = null;
+    try{ tk = localStorage.getItem('kp_token'); }catch(e){}
+    if (tk && !opts.headers['Authorization']) opts.headers['Authorization'] = 'Bearer '+tk;
     return fetch(base + path, opts).then(function(r){
       return r.text().then(function(t){
         var j=null; try{ j = t ? JSON.parse(t) : null; }catch(e){ j={raw:t}; }
@@ -2058,13 +2162,145 @@ const PAGE = String.raw`<!doctype html>
   }
   function boot(){
     return api('/auth/me').then(function(r){
-      if(r.status===401 || !r.ok || !r.body || !r.body.role){ me=null; showLanding(); return; }
+      if(r.status===401 || !r.ok || !r.body || !r.body.role){
+        // Token 登录回退：localStorage 里有 token 时用它验证管理员身份
+        var tk=null; try{ tk=localStorage.getItem('kp_token'); }catch(e){}
+        if(tk){
+          return api('/admin/keys').then(function(a){
+            if(a.ok){ me={ email:'Token 登录', role:'admin', status:'approved', sub:'token' }; showConsole(); }
+            else { try{ localStorage.removeItem('kp_token'); }catch(e){} me=null; showLanding(); }
+          }).catch(function(){ me=null; showLanding(); });
+        }
+        me=null; showLanding(); return;
+      }
       me = r.body; // { email, role, status, sub }
       if(me.role==='admin'){ showConsole(); return; }
       if(me.status==='approved'){ showConsole(); return; }
       showPending();
     }).catch(function(){ me=null; showLanding(); });
   }
+  var tokIn=$('tok-in');
+  if(tokIn){
+    try{ tokIn.value = localStorage.getItem('kp_token')||''; }catch(e){}
+    $('tok-login').onclick=function(){
+      var t=(tokIn.value||'').trim();
+      if(!t){ tokIn.focus(); return; }
+      try{ localStorage.setItem('kp_token', t); }catch(e){}
+      boot();
+    };
+    tokIn.addEventListener('keydown', function(ev){ if(ev.key==='Enter') $('tok-login').click(); });
+  }
+
+  // ---- iOS 27 (Liquid Glass) 主题：深色 / 浅色切换（localStorage 持久化） ----
+  function applyTheme(mode){
+    var root=document.documentElement;
+    if (mode === 'dark') { root.setAttribute('data-theme','dark'); }
+    else if (mode === 'light') { root.setAttribute('data-theme','light'); }
+    else {
+      if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) root.setAttribute('data-theme','dark');
+      else root.setAttribute('data-theme','light');
+    }
+    var icon = root.getAttribute('data-theme') === 'dark' ? '☀️' : '🌙';
+    ['theme-toggle-landing','theme-toggle-side'].forEach(function(id){
+      var b=$(id); if(b) b.innerHTML = icon + ' ' + (root.getAttribute('data-theme')==='dark' ? '浅色' : '深色');
+    });
+  }
+  function toggleTheme(){
+    var root=document.documentElement;
+    var cur = root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+    try{ localStorage.setItem('kp_theme', cur); }catch(e){}
+    applyTheme(cur);
+  }
+  try{
+    var saved = localStorage.getItem('kp_theme');
+    applyTheme(saved || 'auto');
+  }catch(e){ applyTheme('auto'); }
+  ['theme-toggle-landing','theme-toggle-side'].forEach(function(id){
+    var b=$(id); if(b) b.onclick=toggleTheme;
+  });
+
+  // ---------------- admin: add key with model selection ----------------
+  var modalAddKey = $('modalAddKey');
+  if (modalAddKey) {
+    var addProvider = $('addProvider');
+    var addKey = $('addKey');
+    var modelList = $('modelList');
+    var addConfirm = $('addConfirm');
+    var addCancel = $('addCancel');
+    var importSelectBtn = $('importSelectBtn');
+    var modelSearch = $('modelSearch');
+    var modelCount = $('modelCount');
+
+    async function loadProviders() {
+      var r = await api('/admin/providers');
+      var list = (r.body && r.body.providers) || [];
+      addProvider.innerHTML = list.map(function(p){ return '<option value="'+p+'">'+p+'</option>'; }).join('');
+      if (list.length) onProviderChange();
+    }
+    var allModels = [];
+    async function onProviderChange() {
+      var p = addProvider.value;
+      if (!p) return;
+      var key = addKey.value.trim();
+      modelSearch.value = '';
+      if (key) {
+        // 优先用用户输入的 key 去上游实时拉取
+        modelList.innerHTML = '<div class="hint">正在用输入的 Key 向 '+p+' 上游拉取模型列表…</div>';
+        var r = await api('/admin/providers/'+encodeURIComponent(p)+'/live-models', {
+          method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ key: key })
+        });
+        if (r.ok && r.body && Array.isArray(r.body.models) && r.body.models.length) {
+          allModels = r.body.models;
+        } else {
+          // 降级静态列表
+          var s = await api('/admin/providers/'+encodeURIComponent(p)+'/models');
+          allModels = (s.body && s.body.models) || [];
+          var st = modelCount; if (st) st.textContent = '实时拉取失败，已回退内置列表：' + ((r.body && r.body.error && r.body.error.message) || r.status);
+        }
+      } else {
+        var r2 = await api('/admin/providers/'+encodeURIComponent(p)+'/models');
+        allModels = (r2.body && r2.body.models) || [];
+      }
+      renderModels();
+    }
+    function renderModels() {
+      var q = (modelSearch.value || '').trim().toLowerCase();
+      var shown = q
+        ? allModels.filter(function(m){ return m.toLowerCase().includes(q); })
+        : allModels;
+      modelList.innerHTML = shown.length
+        ? shown.map(function(m){
+            return '<label style="display:block;margin:4px 0"><input type="checkbox" value="'+m+'" checked> '+m+'</label>';
+          }).join('')
+        : '<div class="hint">没有匹配的模型</div>';
+      modelCount.textContent = q ? ('显示 '+shown.length+' / '+allModels.length+' 个') : ('共 '+allModels.length+' 个模型');
+    }
+    addProvider.onchange = onProviderChange;
+    modelSearch.oninput = renderModels;
+    var liveTimer = null;
+    addKey.oninput = function(){
+      clearTimeout(liveTimer);
+      liveTimer = setTimeout(function(){
+        if (addKey.value.trim() && addProvider.value) onProviderChange();
+      }, 600);
+    };
+    addCancel.onclick = function(){ modalAddKey.style.display='none'; };
+    importSelectBtn.onclick = function(){ modalAddKey.style.display='block'; loadProviders(); };
+    addConfirm.onclick = async function(){
+      var p = addProvider.value;
+      var k = addKey.value.trim();
+      if (!k) { addKey.focus(); return; }
+      var checked = Array.from(modelList.querySelectorAll('input[type=checkbox]:checked')).map(function(cb){ return cb.value; });
+      var r = await api('/admin/keys/add', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ provider:p, api_key:k, models:checked }) });
+      var o = $('importOut'); o.style.display='block';
+      if (!r.ok) { o.innerHTML = '<span class="e">'+esc((r.body && r.body.error && r.body.error.message)||('错误 '+r.status))+'</span>'; return; }
+      modalAddKey.style.display='none';
+      addKey.value = '';
+      o.innerHTML = '<span class="k">新增 '+(r.body.added||0)+'</span> 重复 '+(r.body.duplicate||0)+' · 已启用 '+(r.body.selected||[]).length+' 个模型 · 已屏蔽 '+(r.body.blocked||[]).length+' 个';
+      loadStats('keys'); loadStats('ov');
+    };
+  }
+
   boot();
 })();
 </script>

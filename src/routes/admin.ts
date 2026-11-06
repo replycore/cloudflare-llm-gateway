@@ -29,6 +29,7 @@ import {
   billingEnabled,
   billingDiscount,
   listModelStatus,
+  setModelStatus,
 } from "../db";
 import { cooldownMinutes, MAX_CONSECUTIVE_FAILS } from "../keypool";
 import { runHealthCheck } from "../cron";
@@ -73,6 +74,171 @@ function parseKeyLines(text: string): {
   }
   return { entries, skipped };
 }
+
+// GET /providers — provider names (admin UI dropdown).
+app.get("/providers", (c) => c.json({ providers: PROVIDERS }));
+
+// GET /providers/:provider/models — static model list for a provider.
+app.get("/providers/:provider/models", (c) => {
+  const raw = c.req.param("provider") || "";
+  const provider = raw.trim().toLowerCase();
+  if (!isProvider(provider)) {
+    return c.json({ error: { message: "unknown provider", type: "invalid_request_error" } }, 400);
+  }
+  try {
+    return c.json({ provider, models: getAdapter(provider as Provider).models() });
+  } catch {
+    return c.json({ error: { message: "provider not registered", type: "invalid_request_error" } }, 400);
+  }
+});
+
+// POST /providers/:provider/live-models — 用用户输入的 Key 实时去上游拉
+// 该 Provider 当前可用的模型列表（OpenAI 兼容 /models 风格）。
+// Body: { key: string }
+app.post("/providers/:provider/live-models", async (c) => {
+  const raw = c.req.param("provider") || "";
+  const provider = raw.trim().toLowerCase();
+  if (!isProvider(provider)) {
+    return c.json({ error: { message: "unknown provider", type: "invalid_request_error" } }, 400);
+  }
+  let body: unknown = null;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: { message: "invalid json body", type: "invalid_request_error" } }, 400);
+  }
+  const key = (body as { key?: unknown } | null)?.key;
+  if (typeof key !== "string" || !key.trim()) {
+    return c.json({ error: { message: "expected { key: string }", type: "invalid_request_error" } }, 400);
+  }
+  const apiKey = key.trim();
+
+  // provider -> { url, header }（Bearer 或 query 参数）
+  const LIVE: Record<string, { url: string; auth: "bearer" | "query"; extraHeaders?: Record<string, string> }> = {
+    openai:     { url: "https://api.openai.com/v1/models", auth: "bearer" },
+    groq:       { url: "https://api.groq.com/openai/v1/models", auth: "bearer" },
+    mistral:    { url: "https://api.mistral.ai/v1/models", auth: "bearer" },
+    deepseek:   { url: "https://api.deepseek.com/v1/models", auth: "bearer" },
+    openrouter: { url: "https://openrouter.ai/api/v1/models", auth: "bearer", extraHeaders: { "HTTP-Referer": "https://keypool.local", "X-Title": "keypool-gateway" } },
+    deepinfra:  { url: "https://api.deepinfra.com/v1/openai/models", auth: "bearer" },
+    fireworks:  { url: "https://api.fireworks.ai/inference/v1/models", auth: "bearer" },
+    cerebras:   { url: "https://api.cerebras.ai/v1/models", auth: "bearer" },
+    ai21:       { url: "https://api.ai21.com/studio/v1/models", auth: "bearer" },
+    cohere:     { url: "https://api.cohere.ai/compatibility/v1/models", auth: "bearer" },
+    glm:        { url: "https://open.bigmodel.cn/api/paas/v4/models", auth: "bearer" },
+    qwen:       { url: "https://dashscope.aliyuncs.com/compatible-mode/v1/models", auth: "bearer" },
+    moonshot:   { url: "https://api.moonshot.cn/v1/models", auth: "bearer" },
+    gemini:     { url: "https://generativelanguage.googleapis.com/v1beta/models", auth: "query" },
+    elevenlabs: { url: "", auth: "bearer" },
+    stability:  { url: "", auth: "bearer" },
+  };
+  const cfg = LIVE[provider];
+  if (!cfg || !cfg.url) {
+    return c.json(
+      { error: { message: `provider "${provider}" does not expose a /models live endpoint; showing the built-in list instead`, type: "invalid_request_error" } },
+      400
+    );
+  }
+  const headers: Record<string, string> = { ...(cfg.extraHeaders || {}) };
+  let url = cfg.url;
+  if (cfg.auth === "bearer") {
+    headers["Authorization"] = `Bearer ${apiKey}`;
+  } else {
+    url += `?key=${encodeURIComponent(apiKey)}`;
+  }
+
+  let upstream: Response;
+  try {
+    upstream = await fetch(url, { headers, redirect: "follow" });
+  } catch (e) {
+    return c.json(
+      { error: { message: `upstream fetch failed: ${e instanceof Error ? e.message : String(e)}`, type: "upstream_error" } },
+      502
+    );
+  }
+  if (!upstream.ok) {
+    const txt = (await upstream.text()).slice(0, 400);
+    return c.json(
+      {
+        error: {
+          message: `upstream returned ${upstream.status}: ${txt}`,
+          type: "upstream_error",
+          status: upstream.status,
+        },
+      },
+      502
+    );
+  }
+  let json: any;
+  try {
+    json = await upstream.json();
+  } catch {
+    return c.json({ error: { message: "upstream did not return JSON", type: "upstream_error" } }, 502);
+  }
+
+  // 兼容两种返回形状并提取 id
+  const extract = (o: any): string | null => {
+    if (typeof o === "string") return o;
+    if (o && typeof o === "object") {
+      const id = o.id ?? o.name ?? o.model ?? o.model_id;
+      if (typeof id === "string" && id) return id;
+    }
+    return null;
+  };
+  let rawList: unknown[] = [];
+  if (Array.isArray(json)) rawList = json;
+  else if (Array.isArray(json?.data)) rawList = json.data;
+  else if (Array.isArray(json?.models)) rawList = json.models;
+  const models = Array.from(new Set(rawList.map(extract).filter((x): x is string => !!x)));
+  if (provider === "gemini") {
+    // google returns {"name":"models/gemini-2.0-flash"} — strip the prefix
+    for (const m of models) {
+      if (m.startsWith("models/")) {
+        models[models.indexOf(m)] = m.slice("models/".length);
+      }
+    }
+  }
+  return c.json({ provider, models, source: "live" });
+});
+
+// POST /keys/add — JSON { provider, api_key, models[] }: import one key and
+// set models NOT in the list unavailable (so future requests skip them).
+app.post("/keys/add", async (c) => {
+  let body: unknown = null;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: { message: "invalid json body", type: "invalid_request_error" } }, 400);
+  }
+  const b = (body ?? {}) as { provider?: unknown; api_key?: unknown; models?: unknown };
+  if (typeof b.provider !== "string" || typeof b.api_key !== "string") {
+    return c.json(
+      { error: { message: "expected { provider: string, api_key: string, models?: string[] }", type: "invalid_request_error" } },
+      400
+    );
+  }
+  const provider = b.provider.trim().toLowerCase();
+  const api_key = b.api_key.trim();
+  if (!isProvider(provider) || !api_key) {
+    return c.json({ error: { message: "unknown provider or empty api_key", type: "invalid_request_error" } }, 400);
+  }
+  const selected = Array.isArray(b.models) ? b.models.filter((m): m is string => typeof m === "string") : [];
+  const result = await importKeys(c.env, [{ provider: provider as Provider, api_key }]);
+  const adapter = getAdapter(provider as Provider);
+  const all = adapter.models();
+  const set = new Set(selected);
+  const blocked: string[] = [];
+  for (const m of all) {
+    if (!set.has(m)) {
+      blocked.push(m);
+      await setModelStatus(c.env, m, provider, false, "blocked by admin");
+    } else {
+      // re-enable explicitly selected models (undo a previous block)
+      await setModelStatus(c.env, m, provider, true, null);
+    }
+  }
+  return c.json({ added: result.added, duplicate: result.duplicate, provider, selected, blocked });
+});
 
 // POST /keys/import — JSON { keys: "..." } or raw text/plain lines.
 app.post("/keys/import", async (c) => {
