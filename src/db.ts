@@ -1012,17 +1012,21 @@ export async function listTokens(
 
 /** Counts grouped by provider+status, plus per-provider active counts. For /admin/keys + /healthz. */
 export async function statsSummary(env: Env): Promise<{
-  byProviderStatus: Array<{ provider: string; status: string; n: number }>;
+  byProviderStatus: Array<{ provider: string; service_slug: string | null; status: string; n: number }>;
   totals: { active: number; cooldown: number; disabled: number };
 }> {
+  // Group by provider AND service slug: custom services are separate
+  // providers in practice (different base URL, different models), and
+  // grouping by provider alone collapses them into one "custom" row.
   const res = await env.DB.prepare(
-    `SELECT provider, status, COUNT(*) AS n
+    `SELECT provider, service_slug, status, COUNT(*) AS n
        FROM keypool_gateway_api_keys
-      GROUP BY provider, status`
+      GROUP BY provider, service_slug, status`
   ).all();
 
   const rows = (res.results ?? []) as unknown as Array<{
     provider: string;
+    service_slug: string | null;
     status: string;
     n: number;
   }>;

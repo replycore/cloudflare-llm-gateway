@@ -1278,7 +1278,7 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
       if(!keys.length){ $('dbg-log').innerHTML='<span style="color:var(--faint)">// 池子里还没有 key,先去「Key 池」添加</span>'; if(b) b.disabled=true; return; }
       if(b) b.disabled=false;
       dbgKeys=keys; // cache full rows so key→provider + health strip work without a re-fetch
-      sel.innerHTML = keys.map(function(k){ return '<option value="'+k.id+'">#'+k.id+' · '+k.provider+' · '+esc(k.masked)+' ('+k.status+')</option>'; }).join('');
+      sel.innerHTML = keys.map(function(k){ var p=(k.provider==='custom'&&k.service_slug)?k.service_slug:k.provider; return '<option value="'+k.id+'">#'+k.id+' · '+p+' · '+esc(k.masked)+' ('+k.status+')</option>'; }).join('');
       if(prev) sel.value=prev; // keep the operator's selection across section re-entry
       sel.onchange=onDbgKeyChange;
       onDbgKeyChange(); // fill the model picker + health strip for the current key
@@ -1777,8 +1777,11 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
         // so operators don't have to click 测活 for each. 测活 refreshes it live.
         var balStr = (k.balance_remaining!=null)
           ? '余 '+(Math.round(k.balance_remaining*100)/100)+' '+(k.balance_unit||'') : '';
+        // Custom keys are named by their service (slug): showing just the
+        // provider ("custom") makes every custom key indistinguishable.
+        var provName = (k.provider === 'custom' && k.service_slug) ? k.service_slug : k.provider;
         return '<tr data-id="'+k.id+'">'
-          +'<td><span class="dot '+sd+'" title="'+sLabel+'"></span>'+esc(k.provider)+proj+'</td>'
+          +'<td><span class="dot '+sd+'" title="'+sLabel+'"></span>'+esc(provName)+proj+'</td>'
           +'<td style="font-family:ui-monospace,monospace;font-size:12.5px;white-space:nowrap">'+esc(k.masked)+' <button class="btn ghost small kl-copy" title="复制完整 key">复制</button></td>'
           +'<td class="n">'+k.total_requests+' / '+k.total_fails+cf+'</td>'
           +'<td class="kl-err" style="max-width:180px;color:var(--faint);font-size:12px;overflow:hidden;text-overflow:ellipsis"'+((cool||reason)?' title="'+esc(cool||String(reason))+'"':'')+'>'+(cool?'<span style="color:var(--amber)">'+esc(cool)+'</span>':err)+'</td>'
@@ -2119,7 +2122,13 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
       // gemini/mistral/openrouter unconditionally, so they showed 0/0/0
       // rows even when never added. Prefer that order when present.
       var prov={};
-      ((s&&s.byProviderStatus)||[]).forEach(function(r){ if(!prov[r.provider])prov[r.provider]={active:0,cooldown:0,disabled:0}; prov[r.provider][r.status]=r.n; });
+      ((s&&s.byProviderStatus)||[]).forEach(function(r){
+        // Custom services are separate providers in practice: split them by
+        // slug, or every service collapses into one unreadable "custom" row.
+        var key = (r.provider === 'custom' && r.service_slug) ? r.service_slug : r.provider;
+        if(!prov[key])prov[key]={active:0,cooldown:0,disabled:0};
+        prov[key][r.status]=r.n;
+      });
       var order=['gemini','mistral','openrouter'];
       Object.keys(prov).sort(function(a,b){ var ia=order.indexOf(a), ib=order.indexOf(b); if(ia<0)ia=order.length; if(ib<0)ib=order.length; return (ia-ib) || (a<b?-1:a>b?1:0); }).forEach(function(p){ var x=prov[p];
         html += '<tr><td style="font-weight:700">'+p+'</td>'
@@ -2208,7 +2217,7 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
       var list=(r.ok && r.body && Array.isArray(r.body.keys)) ? r.body.keys.filter(function(k){ return k.status!=='disabled'; }) : [];
       var b=$('pool-custom-add');
       if(!list.length){ sel.innerHTML='<option value="">还没有可用的 key · 先去上方导入</option>'; if(b) b.disabled=true; return; }
-      sel.innerHTML=list.map(function(k){ return '<option value="'+k.id+'">'+esc(k.provider)+' #'+k.id+' · '+esc(k.masked||'')+'</option>'; }).join('');
+      sel.innerHTML=list.map(function(k){ var p=(k.provider==='custom'&&k.service_slug)?k.service_slug:k.provider; return '<option value="'+k.id+'">'+esc(p)+' #'+k.id+' · '+esc(k.masked||'')+'</option>'; }).join('');
       if(b) b.disabled=false;
     }).catch(function(){ sel.innerHTML='<option value="">加载 key 失败</option>'; });
   }

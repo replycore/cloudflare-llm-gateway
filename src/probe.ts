@@ -6,9 +6,9 @@
  * "测活", and the scheduled (cron) auto health-check.
  */
 
-import type { Env, Provider } from "./types";
+import type { ApiKeyRow, Env, Provider } from "./types";
 import { PROVIDERS } from "./types";
-import { listDueForProbe, markProbed, markAllDueForProbe, getProbeProgress, reactivateKey, applyOutcome, setKeyProjectId, setKeyBalance, setModelStatus, listModelStatus, oneActiveKey, oneActiveKeyRow, firstCustomModel } from "./db";
+import { listDueForProbe, markProbed, markAllDueForProbe, getProbeProgress, reactivateKey, applyOutcome, setKeyProjectId, setKeyBalance, setModelStatusBatch, listModelStatus, oneActiveKey, oneActiveKeyRow, firstCustomModel } from "./db";
 import { getAdapter } from "./providers";
 import { makeCustomAdapter, normalizeBaseUrl } from "./providers/custom";
 import { customServiceSlug } from "./providers/types";
@@ -378,6 +378,12 @@ export async function probeModels(env: Env): Promise<{ checked: number; blocked:
     if (!keyCache.has(provider)) keyCache.set(provider, await oneActiveKey(env, provider));
     return keyCache.get(provider) ?? null;
   };
+  // One key row per custom service (slug): every model of a service shares
+  // its key, so looking it up per model is N redundant D1 reads.
+  const keyRowCache = new Map<string, ApiKeyRow | null>();
+  // Status writes are collected and landed in one D1 batch at the end: one
+  // setModelStatus per model was a sequential D1 round-trip per probe.
+  const pending: { model: string; provider: string; available: boolean; reason: string | null }[] = [];
   const probeOne = async (provider: Provider, model: string): Promise<void> => {
     const k = provider + "\0" + model;
     if (probed.has(k)) return;
@@ -389,7 +395,9 @@ export async function probeModels(env: Env): Promise<{ checked: number; blocked:
     let adapter = getAdapter(provider);
     if (provider === "custom") {
       const slug = customServiceSlug(model);
-      const row = slug ? await oneActiveKeyRow(env, provider, slug) : null;
+      if (!slug) return;
+      if (!keyRowCache.has(slug)) keyRowCache.set(slug, await oneActiveKeyRow(env, provider, slug));
+      const row = keyRowCache.get(slug);
       if (!row) return;
       key = row.api_key;
       adapter = makeCustomAdapter(row.base_url ?? "");
@@ -404,23 +412,27 @@ export async function probeModels(env: Env): Promise<{ checked: number; blocked:
         key
       );
       if (r.ok || r.status === 429) {
-        await setModelStatus(env, model, provider, true, null);
+        pending.push({ model, provider, available: true, reason: null });
       } else {
         const body = await r.text().catch(() => "");
-        await setModelStatus(env, model, provider, false, snippet(body) || `http ${r.status}`);
+        pending.push({ model, provider, available: false, reason: snippet(body) || `http ${r.status}` });
         blocked++;
       }
     } catch (err) {
-      await setModelStatus(env, model, provider, false, snippet(String(err instanceof Error ? err.message : err)));
+      pending.push({ model, provider, available: false, reason: snippet(String(err instanceof Error ? err.message : err)) });
       blocked++;
     }
   };
 
-  // Only user-added models — available before blocked. Never the static
-  // catalog: probing it recreated hardcoded rows in the availability UI.
+  // Only user-added models — never the static catalog: probing it
+  // recreated hardcoded rows in the availability UI. Rotate by
+  // least-recently-checked first (never-checked sorts first): the old
+  // available-first sort re-probed the same leading 24 models every run
+  // and never reached the rest of the pool.
   const rows = await listModelStatus(env);
   rows.sort(
     (a, b) =>
+      (a.last_checked ?? 0) - (b.last_checked ?? 0) ||
       b.available - a.available ||
       (a.provider < b.provider ? -1 : a.provider > b.provider ? 1 : 0) ||
       (a.model < b.model ? -1 : a.model > b.model ? 1 : 0)
@@ -428,8 +440,15 @@ export async function probeModels(env: Env): Promise<{ checked: number; blocked:
   for (const row of rows) {
     if (checked >= MAX_CALLS) break;
     if (!(PROVIDERS as string[]).includes(row.provider)) continue;
-    await probeOne(row.provider as Provider, row.model);
+    // One bad key lookup must not abort the whole sweep (the chat call
+    // below is already isolated; the lookup above it was not).
+    try {
+      await probeOne(row.provider as Provider, row.model);
+    } catch {
+      // Skip this model and keep sweeping.
+    }
   }
+  if (pending.length) await setModelStatusBatch(env, pending);
 
   return { checked, blocked };
 }
