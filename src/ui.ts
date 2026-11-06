@@ -191,62 +191,64 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
   }
   @media (max-width: 820px) {
     :root { --radius-sm: 14px; --radius-md: 20px; --radius-lg: 26px; }
-    body { font-size: 16px; -webkit-text-size-adjust: 100%; padding-bottom: env(safe-area-inset-bottom); }
+    body { font-size: 15px; -webkit-text-size-adjust: 100%; padding-bottom: env(safe-area-inset-bottom); }
     /* MOBILE iOS FIX: do NOT hide the brand — original order is [brand, nav, spacer, me-box].
        We instead turn the whole aside into a narrow vertical rail at the bottom. */
     .layout { flex-direction: column; position: relative; }
+    /* 底栏只留功能标签：品牌与账号组都不占底栏。账号组（预览/admin/退出/主题）挪到顶部细栏。 */
     .side { position: fixed; left: 0; right: 0; bottom: 0; z-index: 900; order: 2; width: 100%; border-top: 1px solid var(--glass-border); border-bottom: none; border-right: none;
-            border-radius: 0; padding: 10px 12px calc(10px + env(safe-area-inset-bottom)) !important; box-shadow: 0 -8px 24px rgba(0,0,0,0.12);
-            flex-direction: row; flex-wrap: wrap; align-items: center; gap: 8px; min-height: 56px; }
-    .side .brand { display: flex; align-items: center; margin: 0 8px 0 0; }
-    .side .brand h1 { font-size: 17px; }
-    .side .brand .logo-dot { width: 26px; height: 26px; border-radius: 8px; }
+            border-radius: 0; padding: 4px 6px calc(4px + env(safe-area-inset-bottom)) !important; box-shadow: 0 -8px 24px rgba(0,0,0,0.12);
+            flex-direction: row; flex-wrap: nowrap; align-items: center; gap: 0; min-height: 52px; }
+    .side .brand { display: none !important; }
     .side .subt { display: none !important; }
-    .nav { display: grid !important; grid-auto-flow: column; grid-auto-columns: minmax(64px, 1fr); gap: 4px; flex: 1; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+    .nav { display: grid !important; grid-auto-flow: column; grid-auto-columns: minmax(52px, 1fr); gap: 2px; flex: 1; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
     .nav::-webkit-scrollbar { display: none; }
-    .nav a { flex-direction: column; justify-content: center; align-items: center; gap: 2px; font-size: 11px; font-weight: 600; padding: 8px 4px 6px !important; min-height: 54px; text-align: center; border-radius: 12px !important; }
+    .nav a { flex-direction: column; justify-content: center; align-items: center; gap: 2px; font-size: 11px; font-weight: 600; padding: 6px 2px 4px !important; min-height: 46px; text-align: center; border-radius: 10px !important; }
     .nav a .hd { width: 8px; height: 8px; }
     .nav a.active { background: var(--blue) !important; color: #fff !important; box-shadow: none !important; }
     .nav a.active .hd { background: #fff !important; }
     .nav a.active.c-red .hd, .nav a.active.c-blue .hd, .nav a.active.c-green .hd, .nav a.active.c-yellow .hd, .nav a.active.c-amber .hd { background: #fff !important; }
     .side .spacer { display: none; }
-    .side .me-box { flex: 0 0 auto; width: auto; border-top: none; padding-top: 0; display: flex; align-items: center; gap: 6px; }
+    /* 顶部细栏：账号组固定在顶部（右对齐），预览入口固定在顶部左侧。display 不加 !important，showConsole() 的行内样式仍能控制预览入口显隐。 */
+    .side .me-box { position: fixed; top: 0; left: 0; right: 0; z-index: 900; display: flex; align-items: center; justify-content: flex-end; gap: 6px;
+      border-top: none; border-bottom: 1px solid var(--glass-border); background: var(--glass-strong); padding: 5px 10px; width: auto; min-height: 38px; }
     .side .me-box .em { display: none; }
-    .side .me-box .pill { font-size: 11px; padding: 4px 8px; }
-    .side .me-box .theme-toggle { width: auto !important; margin-top: 0 !important; min-height: 36px; font-size: 12px; padding: 6px 10px; }
-    .side .me-box .btn { width: auto !important; min-height: 36px; font-size: 13px; padding: 6px 12px; }
+    .side .me-box .pill { font-size: 10px; padding: 3px 7px; }
+    .side .me-box .theme-toggle { width: auto !important; margin-top: 0 !important; min-height: 28px; font-size: 11px; padding: 3px 8px; }
+    .side .me-box .btn { width: auto !important; min-height: 28px; font-size: 12px; padding: 3px 10px; }
+    #preview-toggle { position: fixed; top: 0; left: 10px; z-index: 901; height: 38px; line-height: 38px; align-items: center; margin-top: 0 !important; font-size: 13px !important; }
     /* 预览入口：不要 display:none !important，它会压过 showConsole() 的行内样式，
        手机上管理员永远进不了消费者视角。 */
     .main { order: 1; }
-    .wrap { padding: 16px 16px 120px !important; }
-    .main .wrap { padding-top: 12px !important; }
+    .wrap { padding: 12px 14px 84px !important; }
+    .main .wrap { padding-top: 56px !important; }
     /* Login page: center card must not be clipped by the bottom-anchored II layout */
     /* 登录卡：只保留纵向排列，绝不能 display:flex !important ——
        它会压过 show() 的行内 display:none，导致登录后登录卡还挂在顶上。 */
     #view-landing.center { flex-direction: column; align-items: center; }
     #view-landing.center .top { width: 100%; display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
     #view-landing.center .card { width: 100%; }
-    .card { padding: 18px 16px !important; box-shadow: 0 10px 28px rgba(0,0,0,0.12) !important; }
-    .card h2 { font-size: 18px; }
-    label { font-size: 15px; margin-top: 10px; }
-    input, textarea, select { font-size: 17px !important; min-height: 48px; border-radius: 14px !important; }
-    textarea { min-height: 110px; }
-    .btn, .btn.ghost, .btn.primary { min-height: 50px !important; font-size: 17px !important; width: 100% !important; padding: 14px 18px !important; border-radius: 16px !important; }
-    .btn.small { width: auto !important; min-height: 44px !important; font-size: 15px !important; }
-    #tok-row { display: flex; flex-direction: column; gap: 10px; }
-    #tok-row #tok-login { width: 100% !important; min-height: 52px !important; flex: none; }
-    #tok-row #tok-in { width: 100% !important; min-height: 52px !important; font-size: 17px !important; }
-    .theme-toggle { min-height: 44px; font-size: 14px; padding: 8px 14px; }
-    .grid3 { grid-template-columns: 1fr !important; gap: 10px; }
-    .stat { border-left: none; border-top: 3px solid var(--glass-border); }
+    .card { padding: 14px !important; box-shadow: 0 10px 28px rgba(0,0,0,0.12) !important; }
+    .card h2 { font-size: 16px; margin: 0 0 12px; }
+    label { font-size: 14px; margin-top: 8px; }
+    input, textarea, select { font-size: 16px !important; min-height: 44px; border-radius: 12px !important; }
+    textarea { min-height: 84px; }
+    .btn, .btn.ghost, .btn.primary { min-height: 44px !important; font-size: 15px !important; width: 100% !important; padding: 10px 14px !important; border-radius: 12px !important; }
+    .btn.small { width: auto !important; min-height: 38px !important; font-size: 14px !important; }
+    #tok-row { display: flex; flex-direction: column; gap: 8px; }
+    #tok-row #tok-login { width: 100% !important; min-height: 46px !important; flex: none; }
+    #tok-row #tok-in { width: 100% !important; min-height: 46px !important; font-size: 16px !important; }
+    .theme-toggle { min-height: 40px; font-size: 13px; padding: 6px 12px; }
+    .grid3 { grid-template-columns: 1fr !important; gap: 8px; }
+    .stat { border-left: none; border-top: 3px solid var(--glass-border); padding: 14px 16px !important; }
     .stat.s-a { border-top-color: var(--green); } .stat.s-c { border-top-color: var(--yellow); } .stat.s-d { border-top-color: var(--amber); }
-    .stat .num { font-size: 28px; }
-    table { font-size: 15px; }
+    .stat .num { font-size: 24px; }
+    table { font-size: 14px; }
     .card table { display: block; overflow-x: auto; -webkit-overflow-scrolling: touch; }
-    th, td { padding: 14px 12px; white-space: nowrap; }
-    .sec-h { font-size: 28px; }
-    .sec-sub { font-size: 14px; margin-bottom: 12px; }
-    .center, .card.r1, .card.r2 { padding: 20px 16px !important; }
+    th, td { padding: 10px 8px; white-space: nowrap; }
+    .sec-h { font-size: 22px; }
+    .sec-sub { font-size: 13px; margin-bottom: 10px; }
+    .center, .card.r1, .card.r2 { padding: 16px 14px !important; }
     #modalAddKey { position: fixed !important; left: 50% !important; top: 50% !important; transform: translate(-50%,-50%) !important;
       width: calc(100vw - 24px) !important; max-width: 560px !important; max-height: 86vh !important; overflow-y: auto !important; border-radius: 20px !important; }
     /* ---- narrow-screen fixes (mobile audit 2026-11-07) ---- */
@@ -256,12 +258,7 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
     /* Forms: stack fields full-width so selects/inputs are never truncated. */
     .row { flex-direction: column; align-items: stretch; }
     .row > div { width: 100%; }
-    /* Bottom bar: one row (logo dot + scrollable nav + compact me-box). The active tab is scrolled into view by selectSection. */
-    .side { flex-wrap: nowrap !important; }
-    .side .brand h1 { display: none; }
-    .side .brand .logo-dot { width: 22px; height: 22px; }
-    .nav { grid-auto-columns: minmax(56px, 1fr); }
-    .nav a { font-size: 10px; padding: 6px 2px 4px !important; min-height: 48px; }
+    /* Bottom bar: nav only (brand + account group moved to the top bar above). The active tab is scrolled into view by selectSection. */
     /* Key 列表：表格变卡片，操作按钮换行，不再横向溢出。 */
     #sec-keylist .card table { overflow-x: visible; }
     #sec-keylist thead { display: none; }
