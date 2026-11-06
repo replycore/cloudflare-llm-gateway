@@ -195,8 +195,8 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
     /* MOBILE iOS FIX: do NOT hide the brand — original order is [brand, nav, spacer, me-box].
        We instead turn the whole aside into a narrow vertical rail at the bottom. */
     .layout { flex-direction: column; position: relative; }
-    .side { position: relative; order: 2; top: auto; bottom: auto; width: 100%; border-top: 1px solid var(--glass-border); border-bottom: none; border-right: none;
-            border-radius: 0; padding: 10px 12px calc(10px + env(safe-area-inset-bottom)) !important; box-shadow: none;
+    .side { position: fixed; left: 0; right: 0; bottom: 0; z-index: 900; order: 2; width: 100%; border-top: 1px solid var(--glass-border); border-bottom: none; border-right: none;
+            border-radius: 0; padding: 10px 12px calc(10px + env(safe-area-inset-bottom)) !important; box-shadow: 0 -8px 24px rgba(0,0,0,0.12);
             flex-direction: row; flex-wrap: wrap; align-items: center; gap: 8px; min-height: 56px; }
     .side .brand { display: flex; align-items: center; margin: 0 8px 0 0; }
     .side .brand h1 { font-size: 17px; }
@@ -215,12 +215,15 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
     .side .me-box .pill { font-size: 11px; padding: 4px 8px; }
     .side .me-box .theme-toggle { width: auto !important; margin-top: 0 !important; min-height: 36px; font-size: 12px; padding: 6px 10px; }
     .side .me-box .btn { width: auto !important; min-height: 36px; font-size: 13px; padding: 6px 12px; }
-    #preview-toggle { display: none !important; }
+    /* 预览入口：不要 display:none !important，它会压过 showConsole() 的行内样式，
+       手机上管理员永远进不了消费者视角。 */
     .main { order: 1; }
-    .wrap { padding: 16px 16px 24px !important; }
+    .wrap { padding: 16px 16px 120px !important; }
     .main .wrap { padding-top: 12px !important; }
     /* Login page: center card must not be clipped by the bottom-anchored II layout */
-    #view-landing.center { display: flex !important; flex-direction: column; align-items: center; }
+    /* 登录卡：只保留纵向排列，绝不能 display:flex !important ——
+       它会压过 show() 的行内 display:none，导致登录后登录卡还挂在顶上。 */
+    #view-landing.center { flex-direction: column; align-items: center; }
     #view-landing.center .top { width: 100%; display: flex; align-items: center; gap: 12px; margin-bottom: 10px; }
     #view-landing.center .card { width: 100%; }
     .card { padding: 18px 16px !important; box-shadow: 0 10px 28px rgba(0,0,0,0.12) !important; }
@@ -1062,6 +1065,7 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
       a.classList.toggle('active', a.getAttribute('data-sec')===id);
     });
     if(location.hash!=='#'+id) { try{ history.replaceState(null,'','#'+id); }catch(e){} }
+    try{ window.scrollTo(0,0); }catch(e){} // 切页后回到顶部：移动端底栏点标签，看到的应是新页面的顶部
     onSectionEnter(id);
   }
   // Back/forward + manual hash edits switch sections.
