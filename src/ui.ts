@@ -584,7 +584,7 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
           <h2 class="h-yellow"><span class="hd"></span>导入 key</h2>
           <label>provider:key — 一行一个</label>
           <textarea id="keys" spellcheck="false" placeholder="gemini:AIzaSy...&#10;openrouter:sk-or-v1-...&#10;mistral:..."></textarea>
-          <div style="margin-top:13px"><button class="btn primary" id="importBtn">导入并自动上架</button><button class="btn primary" id="importSelectBtn" style="margin-left:8px;">导入并选择模型</button><button class="btn primary" id="customServiceBtn" style="margin-left:8px;">添加自定义服务</button></div>
+          <div style="margin-top:13px; display:flex; flex-wrap:wrap; gap:8px"><button class="btn primary" id="importBtn">导入并自动上架</button><button class="btn primary" id="importSelectBtn">导入并选择模型</button><button class="btn primary" id="customServiceBtn">添加自定义服务</button></div>
 <div class="out" id="importOut" style="display:none"></div>
           <div class="hint">支持 <code>gemini</code> <code>openai</code> <code>mistral</code> <code>openrouter</code> <code>deepseek</code> <code>groq</code> <code>moonshot</code> <code>glm</code> <code>qwen</code> <code>deepinfra</code> <code>fireworks</code> <code>cerebras</code> <code>ai21</code> <code>cohere</code> <code>elevenlabs</code> <code>stability</code>。重复自动跳过；坏 key 首次调用即自动禁用。</div>
           <div id="customServicePanel" style="display:none;margin-top:14px;border-top:1px solid var(--line);padding-top:12px">
