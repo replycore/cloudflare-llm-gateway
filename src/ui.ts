@@ -196,9 +196,12 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
        We instead turn the whole aside into a narrow vertical rail at the bottom. */
     .layout { flex-direction: column; position: relative; }
     /* 底栏只留功能标签：品牌与账号组都不占底栏。账号组（预览/admin/退出/主题）挪到顶部细栏。 */
+    /* 注意：.side 自带 backdrop-filter，它会困住 fixed 子元素（顶部栏的 fixed 会相对底栏定位、盖在导航上）。
+       移动端去掉 blur、底色改用更不透的 --glass-strong，fixed 子元素才能真正相对视口置顶。 */
     .side { position: fixed; left: 0; right: 0; bottom: 0; z-index: 900; order: 2; width: 100%; border-top: 1px solid var(--glass-border); border-bottom: none; border-right: none;
             border-radius: 0; padding: 4px 6px calc(4px + env(safe-area-inset-bottom)) !important; box-shadow: 0 -8px 24px rgba(0,0,0,0.12);
-            flex-direction: row; flex-wrap: nowrap; align-items: center; gap: 0; min-height: 52px; }
+            flex-direction: row; flex-wrap: nowrap; align-items: center; gap: 0; min-height: 52px;
+            backdrop-filter: none !important; -webkit-backdrop-filter: none !important; background: var(--glass-strong); }
     .side .brand { display: none !important; }
     .side .subt { display: none !important; }
     .nav { display: grid !important; grid-auto-flow: column; grid-auto-columns: minmax(52px, 1fr); gap: 2px; flex: 1; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
@@ -214,7 +217,8 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
       border-top: none; border-bottom: 1px solid var(--glass-border); background: var(--glass-strong); padding: 5px 10px; width: auto; min-height: 38px; }
     .side .me-box .em { display: none; }
     .side .me-box .pill { font-size: 10px; padding: 3px 7px; }
-    .side .me-box .theme-toggle { width: auto !important; margin-top: 0 !important; min-height: 28px; font-size: 11px; padding: 3px 8px; }
+    /* .theme-toggle 自带 margin-left:auto，会把 admin/退出顶到左边、与左上角的 #preview-toggle 重叠；归零后账号组真正右对齐。 */
+    .side .me-box .theme-toggle { width: auto !important; margin-top: 0 !important; margin-left: 0 !important; min-height: 28px; font-size: 11px; padding: 3px 8px; }
     .side .me-box .btn { width: auto !important; min-height: 28px; font-size: 12px; padding: 3px 10px; }
     #preview-toggle { position: fixed; top: 0; left: 10px; z-index: 901; height: 38px; line-height: 38px; align-items: center; margin-top: 0 !important; font-size: 13px !important; }
     /* 预览入口：不要 display:none !important，它会压过 showConsole() 的行内样式，
