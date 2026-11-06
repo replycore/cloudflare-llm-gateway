@@ -1,5 +1,5 @@
 -- keypool-gateway D1 schema
--- Apply with:  wrangler d1 execute keypool --remote --file=./schema.sql
+-- Apply with:  wrangler d1 execute llm-gateway --remote --file=./schema.sql
 
 CREATE TABLE IF NOT EXISTS keypool_gateway_api_keys (
   id                INTEGER PRIMARY KEY AUTOINCREMENT,

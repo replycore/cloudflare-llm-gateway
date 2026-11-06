@@ -43,7 +43,13 @@ function gErr(c: Context<AppEnv>, code: number, message: string): Response {
 function modelPath(c: Context<AppEnv>): string {
   const p = new URL(c.req.url).pathname.replace(/\/+$/, "");
   const i = p.indexOf("/models/");
-  return i >= 0 ? decodeURIComponent(p.slice(i + "/models/".length)) : "";
+  if (i < 0) return "";
+  // A malformed % escape in the model id must not 500 the route.
+  try {
+    return decodeURIComponent(p.slice(i + "/models/".length));
+  } catch {
+    return "";
+  }
 }
 
 app.get("/models", async (c) => {
@@ -74,8 +80,13 @@ app.post("/models/*", async (c) => {
 
   if (method === "countTokens") {
     // No tokenizer at the edge: ~4 chars per token is close enough for clients
-    // that only use this to size a prompt.
-    const chars = JSON.stringify(g.contents ?? []).length;
+    // that only use this to size a prompt. The old code counted only
+    // `contents` — systemInstruction and tools are tokens too, so they count.
+    const parts: unknown[] = [];
+    if (g.systemInstruction !== undefined) parts.push(g.systemInstruction);
+    if (Array.isArray(g.contents)) parts.push(...g.contents);
+    if (Array.isArray(g.tools)) parts.push(...g.tools);
+    const chars = JSON.stringify(parts).length;
     return c.json({ totalTokens: Math.ceil(chars / 4) });
   }
   if (method !== "generateContent" && method !== "streamGenerateContent") {
@@ -106,8 +117,18 @@ app.post("/models/*", async (c) => {
       },
     });
   }
-  const j = await oai.json().catch(() => ({}));
-  return new Response(JSON.stringify(chatToGemini(j as Parameters<typeof chatToGemini>[0], model, wantsThoughts(g))), {
+  // A 200 with an empty or non-JSON body is not a completion — 502 it.
+  const text = await oai.text().catch(() => "");
+  let j: Parameters<typeof chatToGemini>[0];
+  try {
+    j = JSON.parse(text) as Parameters<typeof chatToGemini>[0];
+  } catch {
+    return gErr(c, 502, "upstream returned a non-JSON 200 response");
+  }
+  if (!j || typeof j !== "object" || !Array.isArray(j.choices)) {
+    return gErr(c, 502, "upstream returned an empty 200 response");
+  }
+  return new Response(JSON.stringify(chatToGemini(j, model, wantsThoughts(g))), {
     status: 200,
     headers: { "content-type": "application/json", ...passHeaders },
   });

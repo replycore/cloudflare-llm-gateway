@@ -45,6 +45,8 @@ const PAGE = String.raw`<!doctype html>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>__BRAND__ · AI key 池</title>
+<script>/* Set the theme before CSS loads so the page never flashes the wrong one. */
+try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches))document.documentElement.setAttribute('data-theme','dark');else document.documentElement.setAttribute('data-theme','light');}catch(e){}</script>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=ZCOOL+KuaiLe&family=Permanent+Marker&family=Noto+Sans+SC:wght@400;500;700&display=swap" rel="stylesheet">
@@ -56,6 +58,7 @@ const PAGE = String.raw`<!doctype html>
     --muted:#6e6e73; --faint:#8a8a8e; --red-bg:#fff5f5; --blue-bg:#f0f9ff; --green-bg:#f2fbf5; --yellow-bg:#fffbf0;
     --sans:-apple-system,BlinkMacSystemFont,"SF Pro Display","SF Pro Text","Helvetica Neue","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
     --mono:ui-monospace,Menlo,SFMono-Regular,monospace;
+    --marker:'Permanent Marker','ZCOOL KuaiLe',cursive;
     --radius:20px; --radius-lg:28px; --radius-sm:12px;
     --shadow:0 8px 32px rgba(0,0,0,0.08), 0 1px 3px rgba(0,0,0,0.06);
     --shadow-lg:0 16px 48px rgba(0,0,0,0.12), 0 4px 16px rgba(0,0,0,0.08);
@@ -301,7 +304,8 @@ const PAGE = String.raw`<!doctype html>
     <p id="pending-msg" style="margin:0 0 16px; color:var(--muted)">已提交，等待管理员开通后即可获取 API 令牌。</p>
     <div class="row" style="align-items:center">
       <button class="btn ghost" id="pending-refresh">刷新</button>
-      <a href="/auth/logout" class="btn ghost" style="text-decoration:none">退出</a>
+      <a href="/auth/logout" class="btn ghost" style="text-decoration:none" onclick="try{localStorage.removeItem('kp_token')}catch(e){}">退出</a>
+      <button class="theme-toggle" id="theme-toggle-pending" aria-label="切换主题" style="margin-left:8px">🌗 主题</button>
     </div>
   </div>
 </div>
@@ -317,7 +321,7 @@ const PAGE = String.raw`<!doctype html>
     <div class="me-box">
       <span class="em" id="me-email"></span>
       <span class="pill" id="me-rolepill"><span class="pd"></span><span id="me-role"></span></span>
-      <a href="/auth/logout" class="btn ghost small" style="text-decoration:none; margin-left:6px">退出</a>
+      <a href="/auth/logout" class="btn ghost small" style="text-decoration:none; margin-left:6px" onclick="try{localStorage.removeItem('kp_token')}catch(e){}">退出</a>
       <button class="theme-toggle" id="theme-toggle-side" aria-label="切换主题" style="margin-top:8px; width:100%; justify-content:center">🌗 主题</button>
     </div>
   </aside>
@@ -473,7 +477,7 @@ const PAGE = String.raw`<!doctype html>
             <tbody>
               <tr><td class="mono-token">X-KeyPool-Provider</td><td style="color:var(--muted)">实际命中的供应商(如 gemini)</td></tr>
               <tr><td class="mono-token">X-KeyPool-Model</td><td style="color:var(--muted)">实际使用的模型 id(回退后可能与请求不同)</td></tr>
-              <tr><td class="mono-token">X-KeyPool-Fallback</td><td style="color:var(--muted)">出现即表示发生了回退,值为原始请求的模型</td></tr>
+              <tr><td class="mono-token">X-KeyPool-Fallback</td><td style="color:var(--muted)">出现即表示发生了回退,值为 "1"</td></tr>
             </tbody>
           </table>
         </div>
@@ -542,23 +546,8 @@ const PAGE = String.raw`<!doctype html>
           <textarea id="keys" spellcheck="false" placeholder="gemini:AIzaSy...&#10;openrouter:sk-or-v1-...&#10;mistral:..."></textarea>
           <div style="margin-top:13px"><button class="btn primary" id="importBtn">导入并自动上架</button><button class="btn primary" id="importSelectBtn" style="margin-left:8px;">导入并选择模型</button></div>
 <div class="out" id="importOut" style="display:none"></div>
-<div id="modalAddKey" class="card" style="display:none; position:fixed; top:10%; left:50%; transform:translateX(-50%); z-index:1000; width:90%; max-width:500px;">
-  <h2 class="h-green"><span class="hd"></span>导入并选择模型</h2>
-  <label>提供商</label>
-  <select id="addProvider"></select>
-  <label>API Key</label>
-  <input id="addKey" type="password" placeholder="粘贴 API Key"/>
-  <label style="margin-top:10px;">搜索模型</label>
-  <input id="modelSearch" type="text" placeholder="输入模型名过滤（模糊匹配）"/>
-  <div id="modelList" style="margin-top:10px; max-height:200px; overflow:auto;"></div>
-  <div id="modelCount" class="hint" style="margin-top:6px"></div>
-  <div style="margin-top:10px; display:flex; gap:10px;">
-    <button class="btn primary" id="addConfirm">确认导入</button>
-    <button class="btn ghost" id="addCancel">取消</button>
-  </div>
-</div>
           <div class="hint">支持 <code>gemini</code> <code>openai</code> <code>mistral</code> <code>openrouter</code> <code>deepseek</code> <code>groq</code> <code>moonshot</code> <code>glm</code> <code>qwen</code> <code>deepinfra</code> <code>fireworks</code> <code>cerebras</code> <code>ai21</code> <code>cohere</code> <code>elevenlabs</code> <code>stability</code>。重复自动跳过；坏 key 首次调用即自动禁用。</div>
-          <div class="out" id="importOut" style="display:none"></div>
+          <div class="out" id="importOut2" style="display:none"></div>
         </div>
         <div class="card r1">
           <h2 class="h-green"><span class="hd"></span>各供应商状态
@@ -600,7 +589,7 @@ const PAGE = String.raw`<!doctype html>
             <thead><tr><th>供应商</th><th>key</th><th>请求/失败</th><th>上次错误</th><th>测活 / 余额</th><th>添加时间</th><th>操作</th></tr></thead>
             <tbody id="keylist-body"><tr><td colspan="7" style="color:var(--faint)">加载中…</td></tr></tbody>
           </table>
-          <div class="hint">「测活」实时探测:OpenRouter 显示真实余额;Gemini/Mistral 只能判断是否可用(限流也算可用)。探活成功会自动把禁用/冷却的 key 拉回可用。</div>
+          <div class="hint">「测活」实时探测:OpenRouter 显示真实余额;Gemini/Mistral 只能判断是否可用(限流也算可用)。探活成功会自动把禁用/冷却的 key 拉回可用。「新增模型」用该 key 实时拉取上游模型列表，勾选后加入 /v1/models。</div>
         </div>
       </section>
 
@@ -660,7 +649,7 @@ const PAGE = String.raw`<!doctype html>
             <button class="btn ghost small" id="chat-clear">清空</button>
           </div>
           <div class="hint" id="chat-balance" style="margin-bottom:10px">剩余余额 <span id="chat-bal-usd">–</span> USD</div>
-          <div id="chat-log" style="min-height:180px; max-height:420px; overflow:auto; border:2px dashed #cfcbbd; border-radius:12px; padding:12px; background:var(--cream)"><span style="color:var(--faint)">开始对话…</span></div>
+          <div id="chat-log" style="min-height:180px; max-height:420px; overflow:auto; border:2px dashed #cfcbbd; border-radius:12px; padding:12px; background:var(--creamy)"><span style="color:var(--faint)">开始对话…</span></div>
           <div class="row" style="margin-top:12px; align-items:stretch">
             <div><textarea id="chat-input" style="min-height:56px" placeholder="说点什么…(Enter 发送,Shift+Enter 换行)"></textarea></div>
             <button class="btn primary" id="chat-send">发送</button>
@@ -681,7 +670,7 @@ const PAGE = String.raw`<!doctype html>
           </div>
           <span class="hint" style="display:block;margin:0 0 8px">调试回复默认截断在 256 token</span>
           <div id="dbg-health" class="hint" style="display:none;margin:0 0 8px"></div>
-          <div id="dbg-log" style="min-height:180px; max-height:420px; overflow:auto; border:2px dashed #cfcbbd; border-radius:12px; padding:12px; background:var(--cream)"><span style="color:var(--faint)">选一个 key,直连试聊…</span></div>
+          <div id="dbg-log" style="min-height:180px; max-height:420px; overflow:auto; border:2px dashed #cfcbbd; border-radius:12px; padding:12px; background:var(--creamy)"><span style="color:var(--faint)">选一个 key,直连试聊…</span></div>
           <div class="row" style="margin-top:12px; align-items:stretch">
             <div><textarea id="dbg-input" style="min-height:56px" placeholder="测试这个 key…"></textarea></div>
             <button class="btn primary" id="dbg-send">发送</button>
@@ -863,6 +852,25 @@ const PAGE = String.raw`<!doctype html>
   </main>
 </div>
 
+<!-- 导入并选择模型弹窗：必须是 body 的直接子节点。放在 .card 里会被卡片的
+     backdrop-filter 困住（fixed 相对卡片定位、z-index 也出不去），下半截会被
+     后面的「各供应商状态」卡片盖住；放 body 层 + 全端居中才盖得住整页。 -->
+<div id="modalAddKey" class="card" style="display:none; position:fixed; top:50%; left:50%; transform:translate(-50%,-50%); z-index:1000; width:90%; max-width:500px; max-height:86vh; overflow-y:auto;">
+  <h2 class="h-green"><span class="hd"></span>导入并选择模型</h2>
+  <label>提供商</label>
+  <select id="addProvider"></select>
+  <label>API Key</label>
+  <input id="addKey" type="password" placeholder="粘贴 API Key"/>
+  <label style="margin-top:10px;">搜索模型</label>
+  <input id="modelSearch" type="text" placeholder="输入模型名过滤（模糊匹配）"/>
+  <div id="modelList" style="margin-top:10px; max-height:200px; overflow:auto;"></div>
+  <div id="modelCount" class="hint" style="margin-top:6px"></div>
+  <div style="margin-top:10px; display:flex; gap:10px;">
+    <button class="btn primary" id="addConfirm">确认导入</button>
+    <button class="btn ghost" id="addCancel">取消</button>
+  </div>
+</div>
+
 <script>
 (function(){
   var $ = function(id){ return document.getElementById(id); };
@@ -871,6 +879,7 @@ const PAGE = String.raw`<!doctype html>
   var modelsCache = null;
 
   // ---- same-origin fetch. Cookie auth first; token login stored in localStorage ----
+  // A 120s timeout so a hung request fails visibly instead of spinning forever.
   function api(path, opts){
     opts = opts || {};
     opts.credentials = 'same-origin';
@@ -878,6 +887,12 @@ const PAGE = String.raw`<!doctype html>
     var tk = null;
     try{ tk = localStorage.getItem('kp_token'); }catch(e){}
     if (tk && !opts.headers['Authorization']) opts.headers['Authorization'] = 'Bearer '+tk;
+    var ctrl = null;
+    try {
+      ctrl = new AbortController();
+      opts.signal = ctrl.signal;
+      setTimeout(function(){ try{ ctrl.abort(); }catch(e){} }, 120000);
+    } catch(e){}
     return fetch(base + path, opts).then(function(r){
       return r.text().then(function(t){
         var j=null; try{ j = t ? JSON.parse(t) : null; }catch(e){ j={raw:t}; }
@@ -1116,15 +1131,22 @@ const PAGE = String.raw`<!doctype html>
     function fail(s,t){
       var j=null; try{j=JSON.parse(t);}catch(e){}
       if(s===402){
-        asst.content='余额不足,请先充值'; renderChat(logId,msgs);
+        // Consumer chat: 402 means the caller's gateway balance ran out —
+        // send them to top up. Admin debug chat: the /admin/keys/:id/chat
+        // endpoint bypasses billing, so a 402 here is the UPSTREAM key's
+        // own balance (e.g. a 0-credit OpenRouter account); gateway top-up
+        // can't fix that, and there is no 'balance' section in the admin
+        // nav (selectSection would silently fall back to overview).
+        var isAdmin = me && me.role==='admin';
+        asst.content=isAdmin ? '上游 key 余额不足(该供应商账号没钱了),请给供应商账号充值或换个免费模型' : '余额不足,请先充值'; renderChat(logId,msgs);
         var lg=$(logId);
-        if(lg){ var bt=document.createElement('button'); bt.className='btn primary small'; bt.textContent='去充值'; bt.style.marginTop='6px'; bt.onclick=function(){ selectSection('balance'); }; lg.appendChild(bt); lg.scrollTop=lg.scrollHeight; }
+        if(lg && !isAdmin){ var bt=document.createElement('button'); bt.className='btn primary small'; bt.textContent='去充值'; bt.style.marginTop='6px'; bt.onclick=function(){ selectSection('balance'); }; lg.appendChild(bt); lg.scrollTop=lg.scrollHeight; }
         if(btn){ btn.disabled=false; btn.textContent='发送'; }
         return;
       }
       asst.content='⚠ [错误 '+s+'] '+((j&&j.error&&(j.error.message||j.error))||t||''); renderChat(logId,msgs); if(btn){ btn.disabled=false; btn.textContent='发送'; }
     }
-    fetch(base+path,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload)})
+    fetch(base+path,{method:'POST',headers:(function(){ var h={'content-type':'application/json'}; try{ var tk=localStorage.getItem('kp_token'); if(tk) h['Authorization']='Bearer '+tk; }catch(e){} return h; })(),credentials:'same-origin',body:JSON.stringify(payload)})
     .then(function(resp){
       if(!resp.ok || !resp.body){ return resp.text().then(function(t){ fail(resp.status,t); }); }
       // If the gateway fell back to a different model, label the reply honestly.
@@ -1151,7 +1173,12 @@ const PAGE = String.raw`<!doctype html>
           renderChat(logId,msgs);
           return pump();
         });
-      })();
+      })().catch(function(){
+        // A read error mid-stream (network drop, aborted body) used to leave
+        // the button stuck on "发送中…" with no error shown.
+        asst.content=asst.content||'⚠ 流中断,请重试';
+        renderChat(logId,msgs); if(btn){ btn.disabled=false; btn.textContent='发送'; }
+      });
     }).catch(function(){ asst.content=asst.content||'⚠ 网络错误'; renderChat(logId,msgs); if(btn){ btn.disabled=false; btn.textContent='发送'; } });
   }
   // consumer chat (billed)
@@ -1179,7 +1206,10 @@ const PAGE = String.raw`<!doctype html>
         return;
       }
       if(b) b.disabled=false; if(inp) inp.disabled=false;
-      if(sel && !sel.options.length){
+      // Refill the dropdown every time the chat view opens (no
+      // options.length guard): new models/keys added since the last
+      // visit would otherwise never appear until a full reload.
+      if(sel){
         var groups={};
         (modelsCache||[]).forEach(function(m){ (groups[m.owned_by]=groups[m.owned_by]||[]).push(m.id); });
         sel.innerHTML = Object.keys(groups).map(function(p){
@@ -1207,9 +1237,10 @@ const PAGE = String.raw`<!doctype html>
   }
   // admin debug chat (specific key, no billing)
   var dbgMsgs=[]; var dbgKeys=[]; // cache full key rows so key→provider + health are known
+  var dbgModelStatus=[]; // model_status rows: added models stay listed here even when the key is disabled/cooldown (pool /v1/models hides them then), so the debug picker still offers them
   function initDbgChat(){
     var sel=$('dbg-key'); var prev=sel?sel.value:'';
-    loadModels().then(function(){ return api('/admin/keys/list'); }).then(function(r){
+    Promise.all([loadModels(), api('/admin/models-status').then(function(r){ if(r.ok && Array.isArray(r.body)) dbgModelStatus=r.body; })]).then(function(){ return api('/admin/keys/list'); }).then(function(r){
       if(!sel) return;
       if(!r.ok){ $('dbg-log').innerHTML='<span style="color:var(--faint)">// 拉取 key 列表失败,稍后重试</span>'; return; }
       var keys=(r.body&&r.body.keys)||[];
@@ -1231,9 +1262,14 @@ const PAGE = String.raw`<!doctype html>
     var k=dbgKeyById($('dbg-key').value);
     var ms=$('dbg-model');
     if(ms){
-      // only offer models this key's provider can serve (owned_by === provider), plus '默认'
-      var opts=(modelsCache||[]).filter(function(m){ return k && (m.owned_by||m.ownedBy)===k.provider; });
-      ms.innerHTML='<option value="">默认</option>'+opts.map(function(m){ return '<option value="'+esc(m.id)+'">'+esc(modelLabel(m.id))+'</option>'; }).join('');
+      // Offer every model this key's provider can serve: the pool list
+      // (/v1/models) plus models added via the key list (model_status) —
+      // the latter survive even when the key is disabled and the pool
+      // hides the provider, which is exactly when you're debugging it.
+      var seen={}, opts=[];
+      (modelsCache||[]).forEach(function(m){ if(k && (m.owned_by||m.ownedBy)===k.provider && !seen[m.id]){ seen[m.id]=1; opts.push(m.id); } });
+      (dbgModelStatus||[]).forEach(function(m){ if(k && m.provider===k.provider && m.available && !seen[m.model]){ seen[m.model]=1; opts.push(m.model); } });
+      ms.innerHTML='<option value="">默认</option>'+opts.map(function(id){ return '<option value="'+esc(id)+'">'+esc(modelLabel(id))+'</option>'; }).join('');
     }
     renderDbgHealth(k);
   }
@@ -1360,7 +1396,10 @@ const PAGE = String.raw`<!doctype html>
   function loadAdminLogs(){
     var q='?page='+logsPage+'&size=50'+(logsOwner?('&owner='+encodeURIComponent(logsOwner)):'');
     return api('/admin/logs'+q).then(function(r){
-      if(!r.ok) return;
+      if(!r.ok){
+        var pg=$('logs-page'); if(pg) pg.textContent='加载失败 · 错误 '+r.status;
+        return;
+      }
       var b=r.body||{}; var rows=b.rows||[];
       renderRecent(rows,'l-recent',true);
       var pg=$('logs-page'); if(pg) pg.textContent='第 '+(logsPage+1)+' 页';
@@ -1376,7 +1415,7 @@ const PAGE = String.raw`<!doctype html>
       if(!rows.length){ tb.innerHTML='<tr><td colspan="6" style="color:var(--faint)">暂无</td></tr>'; return; }
       tb.innerHTML=rows.map(function(u,i){
         var rate=u.n>0?Math.round(u.ok/u.n*100)+'%':'–';
-        var last=u.last_at?new Date(u.last_at).toISOString().slice(5,16).replace('T',' '):'–';
+        var last=u.last_at?fmtDate(u.last_at):'–';
         var full=u.owner_email||u.owner_name||u.owner_sub||'管理员令牌';
         return '<tr data-sub="'+esc(String(u.owner_sub||''))+'" style="cursor:pointer">'
           +'<td class="n">'+(i+1)+'</td>'
@@ -1475,6 +1514,7 @@ const PAGE = String.raw`<!doctype html>
     var sel=$('bill-txns-user'); var owner=sel?sel.value:'';
     var q=owner?('?owner='+encodeURIComponent(owner)):'';
     return api('/admin/transactions'+q).then(function(r){
+      if(!r.ok){ tb.innerHTML='<tr><td colspan="8" class="e">加载失败 · 错误 '+r.status+'</td></tr>'; return; }
       var list=Array.isArray(r.body)?r.body:[];
       if(!list.length){ tb.innerHTML='<tr><td colspan="8" style="color:var(--faint)">暂无</td></tr>'; return; }
       tb.innerHTML=list.map(function(t){ return txnRow(t, true); }).join('');
@@ -1515,6 +1555,7 @@ const PAGE = String.raw`<!doctype html>
   function loadPrices(){
     var tb=$('prices-body');
     return api('/admin/prices').then(function(r){
+      if(!r.ok){ tb.innerHTML='<tr><td colspan="4" class="e">加载失败 · 错误 '+r.status+'</td></tr>'; return; }
       var list=Array.isArray(r.body)?r.body:((r.body&&r.body.prices)||[]);
       if(!Array.isArray(list)||!list.length){ tb.innerHTML='<tr><td colspan="4" style="color:var(--faint)">暂无</td></tr>'; return; }
       tb.innerHTML=list.map(function(p){
@@ -1617,6 +1658,7 @@ const PAGE = String.raw`<!doctype html>
   // then drains batches while showing progress. It's non-blocking — closing the
   // page is fine, the external pinger/cron keeps draining in the background.
   var keylistSweeping = false;
+  var keylistStopped = false;
   function renderSweepProgress(done, total){
     var out=$('keylist-checkall-out'); if(!out) return;
     var pct = total>0 ? Math.min(100, Math.round(done*100/total)) : 0;
@@ -1626,13 +1668,17 @@ const PAGE = String.raw`<!doctype html>
   }
   function checkAllKeys(){
     var btn=$('keylist-checkall'), out=$('keylist-checkall-out');
-    if(keylistSweeping){ keylistSweeping=false; if(btn) btn.textContent='检测全部'; return; }
-    keylistSweeping=true; if(btn) btn.textContent='停止检测';
+    if(keylistSweeping){ keylistSweeping=false; keylistStopped=true; if(btn) btn.textContent='检测全部'; return; }
+    keylistSweeping=true; keylistStopped=false; if(btn) btn.textContent='停止检测';
     if(out) out.textContent='标记全部待检测…';
     var total=0, lastDue=-1, stall=0, batches=0;
     function drain(markAll){
       if(!keylistSweeping) return Promise.resolve();
       return api('/admin/sweep'+(markAll?'?all=1':''),{method:'POST'}).then(function(r){
+        // A failed sweep must stop the loop loudly, not look like a finished
+        // check: the old code treated a 500 body as an empty batch and kept
+        // "draining" until the stall guard gave up on a fake success.
+        if(!r.ok) throw new Error('sweep failed: '+r.status);
         var b=r.body||{}; total=b.total||total;
         var due=(b.due==null?0:b.due); renderSweepProgress(Math.max(0,total-due), total);
         batches++; if(batches%5===0) loadKeyList();           // periodic list refresh
@@ -1644,7 +1690,7 @@ const PAGE = String.raw`<!doctype html>
     }
     drain(true).then(function(){
       keylistSweeping=false; if(btn) btn.textContent='检测全部';
-      if(out) out.textContent='已检测全部 '+(total||'')+' 个 key,见下方状态';
+      if(out) out.textContent= keylistStopped ? '已停止检测' : '已检测全部 '+(total||'')+' 个 key,见下方状态';
       loadKeyList();
     }).catch(function(){
       keylistSweeping=false; if(btn) btn.textContent='检测全部';
@@ -1691,7 +1737,7 @@ const PAGE = String.raw`<!doctype html>
         // gemini keys carry a Google project id (parsed on probe); show a short
         // 'proj …<last4>' badge so the operator can spot keys sharing a project.
         var proj = k.project_id
-          ? ' <span class="badge" style="background:var(--cream);border-color:#cfcbbd;color:var(--faint);font-size:9.5px;padding:0 6px" title="project '+esc(String(k.project_id))+'">proj …'+esc(String(k.project_id).slice(-4))+'</span>'
+          ? ' <span class="badge" style="background:var(--creamy);border-color:#cfcbbd;color:var(--faint);font-size:9.5px;padding:0 6px" title="project '+esc(String(k.project_id))+'">proj …'+esc(String(k.project_id).slice(-4))+'</span>'
           : '';
         // per-key health surfacing: consecutive-fail streak, cooldown deadline, last-used.
         var cf = (k.consecutive_fails>0) ? ' <span style="color:var(--red)">(连败 '+k.consecutive_fails+'/3)</span>' : '';
@@ -1708,7 +1754,7 @@ const PAGE = String.raw`<!doctype html>
           +'<td class="kl-err" style="max-width:180px;color:var(--faint);font-size:12px;overflow:hidden;text-overflow:ellipsis"'+((cool||reason)?' title="'+esc(cool||String(reason))+'"':'')+'>'+(cool?'<span style="color:var(--amber)">'+esc(cool)+'</span>':err)+'</td>'
           +'<td class="kl-result" style="font-size:12.5px;white-space:nowrap">'+(balStr?'<span style="color:var(--faint)" title="上次探测余额">'+esc(balStr)+'</span>':'')+'</td>'
           +'<td style="color:var(--faint);font-size:12px;white-space:nowrap" title="'+esc((k.created_at?'添加于 '+new Date(k.created_at).toLocaleString()+' · ':'')+luTitle)+'">'+(k.created_at?fmtDate(k.created_at):'–')+'</td>'
-          +'<td style="white-space:nowrap"><button class="btn ghost small kl-check">测活</button> '+toggle+' <button class="btn ghost small kl-del">删</button></td>'
+          +'<td style="white-space:nowrap"><button class="btn ghost small kl-check">测活</button> <button class="btn ghost small kl-addmodel">新增模型</button> '+toggle+' <button class="btn ghost small kl-del">删</button></td>'
           +'</tr>';
       }).join('');
       Array.prototype.forEach.call(tb.querySelectorAll('tr[data-id]'), function(tr){
@@ -1734,6 +1780,66 @@ const PAGE = String.raw`<!doctype html>
               }
             } else { res.innerHTML='<span style="color:var(--red)">不可用 '+(b.status||'')+'</span>'; }
           }).catch(function(){ chk.disabled=false; res.innerHTML='<span style="color:var(--red)">出错</span>'; });
+        };
+        // 「新增模型」:用该 key 已存的凭证实时拉取上游模型列表,勾选后记为
+        // 可用并进入 /v1/models。面板展开在该行下方,新模型默认勾选。
+        var am=tr.querySelector('.kl-addmodel'); if(am) am.onclick=function(){
+          var next=tr.nextSibling;
+          if(next && next.className && next.className.indexOf('kl-addmodel-row')>=0){ next.parentNode.removeChild(next); return; }
+          var panel=document.createElement('tr');
+          panel.className='kl-addmodel-row';
+          panel.innerHTML='<td colspan="7"><div style="padding:8px 0">'
+            +'<div style="display:flex;gap:8px;align-items:center;margin-bottom:6px"><input class="kl-am-q" placeholder="筛选模型…" style="flex:1"><button class="btn primary small kl-am-add" disabled>添加选中</button><button class="btn ghost small kl-am-cancel">取消</button></div>'
+            +'<div class="kl-am-status hint">正在用该 key 向上游拉取模型列表…</div>'
+            +'<div class="kl-am-list" style="max-height:220px;overflow:auto;margin-top:6px"></div>'
+            +'</div></td>';
+          tr.parentNode.insertBefore(panel, tr.nextSibling);
+          var listEl=panel.querySelector('.kl-am-list');
+          var statusEl=panel.querySelector('.kl-am-status');
+          var addBtn=panel.querySelector('.kl-am-add');
+          var qEl=panel.querySelector('.kl-am-q');
+          var fetched=[];
+          function updateAmAddBtn(){
+            var n=listEl.querySelectorAll('input[type=checkbox]:checked').length;
+            addBtn.disabled=!n;
+            addBtn.textContent=n?('添加选中 ('+n+')'):'添加选中';
+          }
+          function renderAmList(){
+            var needle=(qEl.value||'').trim().toLowerCase();
+            var shown=needle?fetched.filter(function(m){return m.id.toLowerCase().indexOf(needle)>=0;}):fetched;
+            listEl.innerHTML=shown.length?shown.map(function(m){
+              return '<label style="display:block;margin:4px 0"><input type="checkbox" value="'+esc(m.id)+'"'+(m.isNew?' checked':'')+'> '+esc(m.id)+(m.isNew?' <span class="badge">新</span>':'')+'</label>';
+            }).join(''):'<div class="hint">没有匹配的模型</div>';
+            updateAmAddBtn();
+          }
+          listEl.addEventListener('change', updateAmAddBtn);
+          qEl.oninput=renderAmList;
+          panel.querySelector('.kl-am-cancel').onclick=function(){ panel.parentNode.removeChild(panel); };
+          api('/admin/keys/'+id+'/live-models',{method:'POST'}).then(function(r){
+            if(!r.ok || !r.body || !Array.isArray(r.body.models)){
+              statusEl.innerHTML='<span class="e">拉取失败 '+esc((r.body&&r.body.error&&r.body.error.message)||('错误 '+r.status))+'</span>';
+              return;
+            }
+            var known={}; (r.body.known||[]).forEach(function(m){ known[m]=1; });
+            fetched=r.body.models.map(function(m){ return { id:m, isNew:!known[m] }; });
+            var nNew=fetched.filter(function(m){ return m.isNew; }).length;
+            statusEl.textContent='共 '+fetched.length+' 个模型 · 新模型 '+nNew+' 个已默认勾选（已有模型不勾选）';
+            renderAmList();
+          }).catch(function(){ statusEl.innerHTML='<span class="e">网络错误</span>'; });
+          addBtn.onclick=function(){
+            var sel=Array.prototype.map.call(listEl.querySelectorAll('input[type=checkbox]:checked'),function(cb){ return cb.value; });
+            if(!sel.length) return;
+            addBtn.disabled=true; statusEl.textContent='添加中…';
+            api('/admin/keys/'+id+'/models',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({models:sel})}).then(function(r){
+              if(!r.ok){
+                statusEl.innerHTML='<span class="e">添加失败 '+esc((r.body&&r.body.error&&r.body.error.message)||('错误 '+r.status))+'</span>';
+                addBtn.disabled=false; return;
+              }
+              statusEl.innerHTML='<span class="k">已添加 '+(r.body.added||0)+' 个新模型（共提交 '+(r.body.total||0)+' 个）</span> · 模型列表已刷新';
+              loadModels().then(function(){ renderModelsInto('models-body'); renderModelsInto('docs-models-body'); });
+              addBtn.disabled=false;
+            }).catch(function(){ statusEl.innerHTML='<span class="e">网络错误</span>'; addBtn.disabled=false; });
+          };
         };
         var cp=tr.querySelector('.kl-copy'); if(cp) cp.onclick=function(){ cp.disabled=true; var o=cp.textContent; api('/admin/keys/'+id+'/reveal').then(function(r){ cp.disabled=false; if(r.ok && r.body && r.body.api_key){ copy(r.body.api_key, cp); } else { cp.textContent='失败'; setTimeout(function(){cp.textContent=o;},900); } }).catch(function(){ cp.disabled=false; cp.textContent='失败'; setTimeout(function(){cp.textContent=o;},900); }); };
         var en=tr.querySelector('.kl-enable'); if(en) en.onclick=function(){ api('/admin/keys/'+id+'/enable',{method:'POST'}).then(loadKeyList); };
@@ -1847,7 +1953,15 @@ const PAGE = String.raw`<!doctype html>
         b.onclick = function(){
           if(!confirm('删除该令牌？此操作不可撤销。')) return;
           b.disabled=true;
-          api('/me/tokens/'+b.getAttribute('data-del'),{method:'DELETE'}).then(function(r){ if(!r.ok){ b.disabled=false; return; } loadMyTokens(); }).catch(function(){ b.disabled=false; });
+          api('/me/tokens/'+b.getAttribute('data-del'),{method:'DELETE'}).then(function(r){
+            if(!r.ok){
+              b.disabled=false;
+              var msg=(r.body&&r.body.error&&r.body.error.message)||('错误 '+r.status);
+              alert('删除失败: '+msg);
+              return;
+            }
+            loadMyTokens();
+          }).catch(function(){ b.disabled=false; alert('删除失败: 网络错误'); });
         };
       });
     }).catch(function(){ if(tb) tb.innerHTML='<tr><td colspan="9" style="color:var(--red)">网络错误</td></tr>'; });
@@ -1863,7 +1977,7 @@ const PAGE = String.raw`<!doctype html>
       }
       o.innerHTML='新令牌(立即复制): <span class="k mono-token copyable" data-copy="'+esc(r.body.token)+'">'+esc(r.body.token)+'</span> <button class="btn ghost small" id="my-mint-close">我已复制 · 关闭</button>';
       bindCopy(o); var cb=$('my-mint-close'); if(cb) cb.onclick=function(){ o.style.display='none'; o.innerHTML=''; }; $('my-tname').value=''; loadMyTokens();
-    }).catch(function(){ btn.disabled=false; btn.textContent='生成令牌'; });
+    }).catch(function(){ btn.disabled=false; btn.textContent='生成令牌'; var o=$('my-mint-out'); o.style.display='block'; o.innerHTML='<span class="e">网络错误</span>'; });
   }
 
   // ---------------- docs (shared, static from models) ----------------
@@ -1937,10 +2051,13 @@ const PAGE = String.raw`<!doctype html>
       // pool empty: don't render phantom all-zero gemini/mistral/openrouter rows
       html='<tr><td colspan="4" class="kp-stats-empty" style="color:var(--faint);cursor:pointer">还没有 key · 去「Key 池」导入</td></tr>';
     } else {
-      var prov={}, order=['gemini','mistral','openrouter'];
-      order.forEach(function(p){ prov[p]={active:0,cooldown:0,disabled:0}; });
+      // Only providers that actually have keys — the old code seeded
+      // gemini/mistral/openrouter unconditionally, so they showed 0/0/0
+      // rows even when never added. Prefer that order when present.
+      var prov={};
       ((s&&s.byProviderStatus)||[]).forEach(function(r){ if(!prov[r.provider])prov[r.provider]={active:0,cooldown:0,disabled:0}; prov[r.provider][r.status]=r.n; });
-      Object.keys(prov).forEach(function(p){ var x=prov[p];
+      var order=['gemini','mistral','openrouter'];
+      Object.keys(prov).sort(function(a,b){ var ia=order.indexOf(a), ib=order.indexOf(b); if(ia<0)ia=order.length; if(ib<0)ib=order.length; return (ia-ib) || (a<b?-1:a>b?1:0); }).forEach(function(p){ var x=prov[p];
         html += '<tr><td style="font-weight:700">'+p+'</td>'
           +'<td class="n"><span class="dot d-active '+(x.active>0?'':'d-zero')+'"></span>'+x.active+'</td>'
           +'<td class="n"><span class="dot d-cooldown '+(x.cooldown>0?'':'d-zero')+'"></span>'+x.cooldown+'</td>'
@@ -1993,6 +2110,7 @@ const PAGE = String.raw`<!doctype html>
   function loadModelStatus(){
     var el=$('modelstatus-body'); if(!el) return;
     return api('/admin/models-status').then(function(r){
+      if(!r.ok){ el.innerHTML='<span class="e">加载失败 · 错误 '+r.status+'</span>'; return; }
       var list=Array.isArray(r.body)?r.body:[];
       if(!list.length){ el.innerHTML='<span style="color:var(--faint)">尚未探测 · 点「探测模型」逐个试调</span>'; return; }
       var bad=list.filter(function(m){ return !m.available; });
@@ -2130,10 +2248,10 @@ const PAGE = String.raw`<!doctype html>
 
   // ---------------- boot / routing ----------------
   function showLanding(){
+    // Don't call /v1/models here: it requires auth, so an unauthenticated
+    // landing would 401 and the models card would stay hidden anyway.
+    // Models appear after login, in the console.
     show('view-landing');
-    loadModels().then(function(list){
-      if(list.length){ $('landing-models').style.display='block'; renderModelsInto('landing-models-body'); }
-    });
   }
   function showPending(){
     show('view-pending');
@@ -2201,7 +2319,7 @@ const PAGE = String.raw`<!doctype html>
       else root.setAttribute('data-theme','light');
     }
     var icon = root.getAttribute('data-theme') === 'dark' ? '☀️' : '🌙';
-    ['theme-toggle-landing','theme-toggle-side'].forEach(function(id){
+    ['theme-toggle-landing','theme-toggle-side','theme-toggle-pending'].forEach(function(id){
       var b=$(id); if(b) b.innerHTML = icon + ' ' + (root.getAttribute('data-theme')==='dark' ? '浅色' : '深色');
     });
   }
@@ -2215,7 +2333,7 @@ const PAGE = String.raw`<!doctype html>
     var saved = localStorage.getItem('kp_theme');
     applyTheme(saved || 'auto');
   }catch(e){ applyTheme('auto'); }
-  ['theme-toggle-landing','theme-toggle-side'].forEach(function(id){
+  ['theme-toggle-landing','theme-toggle-side','theme-toggle-pending'].forEach(function(id){
     var b=$(id); if(b) b.onclick=toggleTheme;
   });
 
@@ -2238,9 +2356,12 @@ const PAGE = String.raw`<!doctype html>
       if (list.length) onProviderChange();
     }
     var allModels = [];
+    var provSeq = 0; // stale-response guard: a slow live-models fetch for the
+    // previous provider must not overwrite the current provider's list.
     async function onProviderChange() {
       var p = addProvider.value;
       if (!p) return;
+      var seq = ++provSeq;
       var key = addKey.value.trim();
       modelSearch.value = '';
       if (key) {
@@ -2249,16 +2370,19 @@ const PAGE = String.raw`<!doctype html>
         var r = await api('/admin/providers/'+encodeURIComponent(p)+'/live-models', {
           method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ key: key })
         });
+        if (seq !== provSeq) return;
         if (r.ok && r.body && Array.isArray(r.body.models) && r.body.models.length) {
           allModels = r.body.models;
         } else {
           // 降级静态列表
           var s = await api('/admin/providers/'+encodeURIComponent(p)+'/models');
+          if (seq !== provSeq) return;
           allModels = (s.body && s.body.models) || [];
           var st = modelCount; if (st) st.textContent = '实时拉取失败，已回退内置列表：' + ((r.body && r.body.error && r.body.error.message) || r.status);
         }
       } else {
         var r2 = await api('/admin/providers/'+encodeURIComponent(p)+'/models');
+        if (seq !== provSeq) return;
         allModels = (r2.body && r2.body.models) || [];
       }
       renderModels();
@@ -2270,12 +2394,17 @@ const PAGE = String.raw`<!doctype html>
         : allModels;
       modelList.innerHTML = shown.length
         ? shown.map(function(m){
-            return '<label style="display:block;margin:4px 0"><input type="checkbox" value="'+m+'" checked> '+m+'</label>';
+            return '<label style="display:block;margin:4px 0"><input type="checkbox" value="'+esc(m)+'" checked> '+esc(m)+'</label>';
           }).join('')
         : '<div class="hint">没有匹配的模型</div>';
       modelCount.textContent = q ? ('显示 '+shown.length+' / '+allModels.length+' 个') : ('共 '+allModels.length+' 个模型');
     }
-    addProvider.onchange = onProviderChange;
+    addProvider.onchange = function(){
+      // A key belongs to one provider — switching providers with the old
+      // key still in the box would probe the new provider with it.
+      addKey.value='';
+      onProviderChange();
+    };
     modelSearch.oninput = renderModels;
     var liveTimer = null;
     addKey.oninput = function(){

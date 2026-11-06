@@ -1,12 +1,13 @@
 /**
- * Native passthrough routes: /gemini/*, /mistral/*, /openrouter/*.
+ * Native passthrough routes: /gemini/*, /mistral/*, /openrouter/*,
+ * /elevenlabs/*, /stability/*.
  *
  * Each prefix proxies the request to the matching provider's upstream API via
  * the key pool. `subPath` is everything after `/<provider>` (keeping the
  * leading `/` and the original query string), e.g.
  * `/v1beta/models/gemini-2.0-flash:generateContent?alt=sse`.
  *
- * This module exports a default Hono instance that handles all three prefixes
+ * This module exports a default Hono instance that handles all five prefixes
  * (via `app.all("/gemini/*", ...)` etc). `index.ts` mounts it at the root with
  * `app.route("/", passthrough)`.
  */
@@ -56,7 +57,14 @@ function handle(provider: Provider): (c: Context<AppEnv>) => Promise<Response> {
     }
     // Price native passthrough at the provider's default model (the raw body
     // isn't parsed here) instead of the global default fallback price.
-    const billModel = getAdapter(provider).models()[0] ?? null;
+    // For Gemini the model is in the URL path
+    // (/gemini/v1beta/models/<model>:generateContent) — use it when present
+    // so billing charges the real model, not the adapter default.
+    let billModel = getAdapter(provider).models()[0] ?? null;
+    if (provider === "gemini") {
+      const m = /\/models\/([^/:?]+)/.exec(subPath);
+      if (m) billModel = decodeURIComponent(m[1]);
+    }
 
     // Billing: reserve a max-cost hold (concurrency-safe gate), refund after.
     const billing = billingEnabled(c.env) && !!caller.ownerSub;
@@ -68,19 +76,36 @@ function handle(provider: Provider): (c: Context<AppEnv>) => Promise<Response> {
         return c.json({ error: { message: "余额不足,请充值", type: "insufficient_balance" } }, 402);
       }
     }
+    let streamed = false;
+    const releaseHold = billing && hold > 0
+      ? () => refundBalance(c.env, caller.ownerSub as string, hold)
+      : undefined;
     try {
-      const res = await callWithPool(
-        c.env,
-        provider,
-        (key: string) => getAdapter(provider).passthrough(subPath, req, key),
-        { model: billModel, tokenId: caller.tokenId, ownerSub: caller.ownerSub, ctx: c.executionCtx }
-      );
+      let res: Response;
+      try {
+        res = await callWithPool(
+          c.env,
+          provider,
+          (key: string) => getAdapter(provider).passthrough(subPath, req, key),
+          { model: billModel, tokenId: caller.tokenId, ownerSub: caller.ownerSub, ctx: c.executionCtx, onStreamCharged: releaseHold }
+        );
+      } catch (err) {
+        // callWithPool throwing (DB/pool failure) must not become an unhandled 500.
+        return c.json(
+          { error: { message: `pool error: ${err instanceof Error ? err.message : String(err)}`, type: "pool_error" } },
+          502
+        );
+      }
+      streamed = (res.headers.get("content-type") || "").includes("text/event-stream");
       if (caller.tokenId !== null && res.status >= 200 && res.status <= 299) {
         await incrementTokenUse(c.env, caller.tokenId);
       }
       return res;
     } finally {
-      if (billing && hold > 0) await refundBalance(c.env, caller.ownerSub as string, hold);
+      // Streaming: the charge lands later in the background scan, which
+      // releases the hold via onStreamCharged — releasing here would let a
+      // concurrent request spend the same money.
+      if (billing && hold > 0 && !streamed) await refundBalance(c.env, caller.ownerSub as string, hold);
     }
   };
 }
@@ -90,9 +115,13 @@ const app = new Hono<AppEnv>();
 app.use("/gemini/*", requireUser);
 app.use("/mistral/*", requireUser);
 app.use("/openrouter/*", requireUser);
+app.use("/elevenlabs/*", requireUser);
+app.use("/stability/*", requireUser);
 
 app.all("/gemini/*", handle("gemini"));
 app.all("/mistral/*", handle("mistral"));
 app.all("/openrouter/*", handle("openrouter"));
+app.all("/elevenlabs/*", handle("elevenlabs"));
+app.all("/stability/*", handle("stability"));
 
 export default app;

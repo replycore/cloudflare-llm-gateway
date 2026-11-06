@@ -1,12 +1,16 @@
 /** Gemini provider adapter: OpenAI<->Gemini translation (incl. streaming) + native passthrough. */
 
 import type { ProviderAdapter, OpenAIChatRequest } from "./types";
+import { stripProviderPrefix } from "./types";
 import { budgetFromEffort, canReason, normEffort } from "../reasoning";
 
 const BASE = "https://generativelanguage.googleapis.com";
 
 interface GeminiPart {
-  text: string;
+  text?: string;
+  inlineData?: { mimeType: string; data: string };
+  functionCall?: { name: string; args?: unknown };
+  functionResponse?: { name: string; response: unknown };
 }
 
 interface GeminiContent {
@@ -41,10 +45,48 @@ function contentToText(content: unknown): string {
         if (typeof p.text === "string") out.push(p.text);
       }
     }
-    return out.join("");
+    return out.join("\n");
   }
   if (content == null) return "";
   return String(content);
+}
+
+/** Split an OpenAI message into Gemini parts: text, images (data URLs only),
+ *  tool calls (assistant) / tool results (tool role). */
+function messageParts(msg: OpenAIChatRequest["messages"][number]): GeminiPart[] {
+  const parts: GeminiPart[] = [];
+  const content = msg.content;
+  if (typeof content === "string") {
+    if (content) parts.push({ text: content });
+  } else if (Array.isArray(content)) {
+    for (const part of content) {
+      if (!part || typeof part !== "object") continue;
+      const p = part as { type?: unknown; text?: unknown; image_url?: unknown };
+      if (p.type === "text" && typeof p.text === "string" && p.text) parts.push({ text: p.text });
+      else if (p.type === "image_url") {
+        const url = typeof p.image_url === "string" ? p.image_url : (p.image_url as { url?: unknown } | undefined)?.url;
+        if (typeof url === "string") {
+          const m = /^data:([^;]+);base64,(.+)$/.exec(url);
+          if (m) parts.push({ inlineData: { mimeType: m[1], data: m[2] } });
+          // Remote image URLs can't be sent to Gemini (it takes inline
+          // bytes or a Files API reference) — dropped, not faked.
+        }
+      }
+    }
+  }
+  const calls = (msg as { tool_calls?: Array<{ function?: { name?: string; arguments?: string } }> }).tool_calls;
+  if (Array.isArray(calls)) {
+    for (const c of calls) {
+      let args: unknown = {};
+      try {
+        args = JSON.parse(c.function?.arguments ?? "{}") as unknown;
+      } catch {
+        args = {};
+      }
+      parts.push({ functionCall: { name: c.function?.name ?? "", args } });
+    }
+  }
+  return parts;
 }
 
 /** Build the Gemini request body from an OpenAI chat request. */
@@ -58,11 +100,36 @@ function toGeminiBody(req: OpenAIChatRequest): GeminiRequestBody {
       if (text) systemTexts.push(text);
       continue;
     }
+    if (msg.role === "tool") {
+      // Tool results are functionResponse parts in a USER content.
+      let response: unknown = {};
+      try {
+        response = JSON.parse(text || "{}") as unknown;
+      } catch {
+        response = { result: text };
+      }
+      const name = (msg as { name?: string }).name ?? "";
+      contents.push({ role: "user", parts: [{ functionResponse: { name, response } }] });
+      continue;
+    }
     const role: "user" | "model" = msg.role === "assistant" ? "model" : "user";
-    contents.push({ role, parts: [{ text }] });
+    const parts = messageParts(msg);
+    if (parts.length) contents.push({ role, parts });
   }
 
-  const body: GeminiRequestBody = { contents };
+  // Gemini rejects consecutive same-role contents — merge them.
+  const merged: GeminiContent[] = [];
+  for (const c of contents) {
+    const last = merged[merged.length - 1];
+    if (last && last.role === c.role) last.parts.push(...c.parts);
+    else merged.push({ role: c.role, parts: [...c.parts] });
+  }
+  // Gemini requires the first content to be a user turn.
+  if (merged.length > 0 && merged[0].role !== "user") {
+    merged.unshift({ role: "user", parts: [{ text: "(continue)" }] });
+  }
+
+  const body: GeminiRequestBody = { contents: merged };
 
   if (systemTexts.length > 0) {
     body.systemInstruction = { parts: [{ text: systemTexts.join("\n") }] };
@@ -203,14 +270,15 @@ function streamToOpenAI(
   let buffer = "";
   let sentRole = false;
 
-  function chunkFrame(delta: Record<string, unknown>, finishReason: string | null): Uint8Array {
-    const payload = {
+  function chunkFrame(delta: Record<string, unknown>, finishReason: string | null, usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number }): Uint8Array {
+    const payload: Record<string, unknown> = {
       id,
       object: "chat.completion.chunk",
       created,
       model,
       choices: [{ index: 0, delta, finish_reason: finishReason }],
     };
+    if (usage) payload.usage = usage;
     return encoder.encode(`data: ${JSON.stringify(payload)}\n\n`);
   }
 
@@ -236,8 +304,23 @@ function streamToOpenAI(
       controller.enqueue(chunkFrame({ content: text }, null));
     }
     const finish = mapFinishReason(extractFinishReason(obj));
+    // Forward Gemini's usageMetadata as an OpenAI usage chunk so the pool's
+    // stream scan can bill exact tokens instead of estimating.
+    let usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number } | undefined;
+    if (obj && typeof obj === "object") {
+      const meta = (obj as Record<string, unknown>).usageMetadata;
+      if (meta && typeof meta === "object") {
+        const m = meta as Record<string, unknown>;
+        const prompt = typeof m.promptTokenCount === "number" ? m.promptTokenCount : 0;
+        const completion = typeof m.candidatesTokenCount === "number" ? m.candidatesTokenCount : 0;
+        const total = typeof m.totalTokenCount === "number" ? m.totalTokenCount : prompt + completion;
+        if (prompt || completion || total) usage = { prompt_tokens: prompt, completion_tokens: completion, total_tokens: total };
+      }
+    }
     if (finish) {
-      controller.enqueue(chunkFrame({}, finish));
+      controller.enqueue(chunkFrame({}, finish, usage));
+    } else if (usage) {
+      controller.enqueue(chunkFrame({}, null, usage));
     }
   }
 
@@ -287,7 +370,8 @@ const gemini: ProviderAdapter = {
   },
 
   async chatCompletions(req: OpenAIChatRequest, key: string): Promise<Response> {
-    const model = req.model;
+    // A routed id like "gemini:gemini-2.0-flash" is stripped first.
+    const model = stripProviderPrefix(req.model);
     const stream = req.stream === true;
     const method = stream ? "streamGenerateContent" : "generateContent";
     const url = `${BASE}/v1beta/models/${encodeURIComponent(model)}:${method}${
@@ -295,6 +379,14 @@ const gemini: ProviderAdapter = {
     }`;
 
     const body = toGeminiBody(req);
+    // A request with no user/model content (e.g. system-only) is invalid for
+    // Gemini — fail here instead of sending an empty contents array.
+    if (body.contents.length === 0) {
+      return new Response(JSON.stringify({ error: { message: "no user content to send to Gemini", type: "invalid_request" } }), {
+        status: 502,
+        headers: jsonHeaders,
+      });
+    }
 
     const upstream = await fetch(url, {
       method: "POST",
@@ -332,7 +424,17 @@ const gemini: ProviderAdapter = {
       });
     }
 
-    const gem = await upstream.json();
+    // A 200 with a non-JSON body (proxy error page, truncated response) is
+    // not a completion — 502 it instead of crashing on .json().
+    let gem: unknown;
+    try {
+      gem = await upstream.json();
+    } catch {
+      return new Response(JSON.stringify({ error: { message: "upstream returned a non-JSON 200 response", type: "upstream_error" } }), {
+        status: 502,
+        headers: jsonHeaders,
+      });
+    }
     const openai = toOpenAICompletion(gem, model);
     return new Response(JSON.stringify(openai), { status: 200, headers: jsonHeaders });
   },

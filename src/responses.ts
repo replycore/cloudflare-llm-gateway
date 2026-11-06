@@ -7,7 +7,7 @@
  */
 
 import type { OpenAIChatRequest } from "./providers/types";
-import { forEachOpenAIChunk, randomHex, ToolCallAccumulator } from "./sse";
+import { contentToText, forEachOpenAIChunk, randomHex, ToolCallAccumulator } from "./sse";
 import { normEffort } from "./reasoning";
 
 // ---------- request: Responses -> Chat ----------
@@ -37,6 +37,10 @@ export interface ResponsesRequest {
   tools?: Array<{ type?: string; name?: string; description?: string; parameters?: unknown; strict?: boolean }>;
   tool_choice?: unknown;
   reasoning?: { effort?: string; summary?: string };
+  /** Structured output: `text: {format: {...}}` maps to chat `response_format`. */
+  text?: { format?: unknown };
+  parallel_tool_calls?: boolean;
+  metadata?: unknown;
   [k: string]: unknown;
 }
 
@@ -53,7 +57,7 @@ function partsToChatContent(content: string | ContentPart[] | undefined): unknow
       if (url) parts.push({ type: "image_url", image_url: { url } });
     }
   }
-  if (parts.every((p) => p.type === "text")) return parts.map((p) => (p as { text: string }).text).join("");
+  if (parts.every((p) => p.type === "text")) return parts.map((p) => (p as { text: string }).text).join("\n");
   return parts;
 }
 
@@ -96,13 +100,25 @@ export function responsesToChat(r: ResponsesRequest): OpenAIChatRequest {
   if (fnTools.length) {
     out.tools = fnTools.map((t) => ({
       type: "function",
-      function: { name: t.name, description: t.description, parameters: t.parameters ?? { type: "object", properties: {} } },
+      function: {
+        name: t.name,
+        description: t.description,
+        parameters: t.parameters ?? { type: "object", properties: {} },
+        // strict is part of the tool definition — dropping it silently
+        // turned a strict function call into a loose one.
+        ...(typeof t.strict === "boolean" ? { strict: t.strict } : {}),
+      },
     }));
     if (typeof r.tool_choice === "string") out.tool_choice = r.tool_choice;
     else if (r.tool_choice && typeof r.tool_choice === "object" && (r.tool_choice as { name?: string }).name) {
       out.tool_choice = { type: "function", function: { name: (r.tool_choice as { name: string }).name } };
     }
   }
+  // Passthroughs the old code dropped: structured-output format, parallel
+  // tool calls, and request metadata all reach the chat request now.
+  if (r.text?.format) out.response_format = r.text.format as OpenAIChatRequest["response_format"];
+  if (typeof r.parallel_tool_calls === "boolean") out.parallel_tool_calls = r.parallel_tool_calls;
+  if (r.metadata !== undefined) out.metadata = r.metadata;
   if ("fallback" in r) out.fallback = r.fallback;
   const effort = normEffort(r.reasoning?.effort);
   if (effort) out.reasoning_effort = effort;
@@ -141,7 +157,7 @@ function baseResponse(id: string, model: string, r: ResponsesRequest, status: st
     max_output_tokens: r.max_output_tokens ?? null,
     model,
     output: [] as unknown[],
-    parallel_tool_calls: true,
+    parallel_tool_calls: typeof r.parallel_tool_calls === "boolean" ? r.parallel_tool_calls : true,
     temperature: r.temperature ?? null,
     tool_choice: r.tool_choice ?? "auto",
     tools: r.tools ?? [],
@@ -171,7 +187,7 @@ function functionCallItem(callId: string, name: string, args: string) {
 /** Translate a non-streaming chat completion into a Responses object. */
 export function chatToResponses(c: ChatCompletion, r: ResponsesRequest): unknown {
   const choice = c.choices?.[0];
-  const text = typeof choice?.message?.content === "string" ? choice.message.content : "";
+  const text = contentToText(choice?.message?.content);
   const resp = baseResponse("resp_" + randomHex(24), r.model, r, "completed");
   const thinking = typeof choice?.message?.reasoning_content === "string" ? choice.message.reasoning_content : "";
   if (thinking) resp.output.push(reasoningItem("rs_" + randomHex(24), thinking));
@@ -249,28 +265,43 @@ export function chatStreamToResponses(upstream: ReadableStream<Uint8Array>, r: R
           emit("response.content_part.added", { item_id: msgId, output_index: msgIdx, content_index: 0, part: { type: "output_text", text: "", annotations: [] } });
         };
 
-        await forEachOpenAIChunk(upstream, (chunk) => {
-          if (chunk.usage) {
-            if (typeof chunk.usage.prompt_tokens === "number") inTok = chunk.usage.prompt_tokens;
-            if (typeof chunk.usage.completion_tokens === "number") outTok = chunk.usage.completion_tokens;
-          }
-          const ch = chunk.choices?.[0];
-          if (!ch) return;
-          const thought = (ch.delta as { reasoning_content?: string | null } | undefined)?.reasoning_content;
-          if (typeof thought === "string" && thought.length && msgIdx < 0) {
-            openReasoning();
-            thinking += thought;
-            emit("response.reasoning_summary_text.delta", { item_id: rsId, output_index: rsIdx, summary_index: 0, delta: thought });
-          }
-          const piece = ch.delta?.content;
-          if (typeof piece === "string" && piece.length) {
-            openMsg();
-            text += piece;
-            emit("response.output_text.delta", { item_id: msgId, output_index: msgIdx, content_index: 0, delta: piece, logprobs: [] });
-          }
-          if (ch.delta?.tool_calls) tools.add(ch.delta.tool_calls);
-          if (ch.finish_reason) finish = ch.finish_reason;
-        });
+        let streamError: string | null = null;
+        try {
+          await forEachOpenAIChunk(upstream, (chunk) => {
+            if (chunk.usage) {
+              if (typeof chunk.usage.prompt_tokens === "number") inTok = chunk.usage.prompt_tokens;
+              if (typeof chunk.usage.completion_tokens === "number") outTok = chunk.usage.completion_tokens;
+            }
+            const ch = chunk.choices?.[0];
+            if (!ch) return;
+            const thought = (ch.delta as { reasoning_content?: string | null } | undefined)?.reasoning_content;
+            // No `msgIdx < 0` guard: reasoning that arrives AFTER text started
+            // is still thinking — the old guard silently dropped it.
+            if (typeof thought === "string" && thought.length) {
+              openReasoning();
+              thinking += thought;
+              emit("response.reasoning_summary_text.delta", { item_id: rsId, output_index: rsIdx, summary_index: 0, delta: thought });
+            }
+            const piece = ch.delta?.content;
+            if (typeof piece === "string" && piece.length) {
+              openMsg();
+              text += piece;
+              emit("response.output_text.delta", { item_id: msgId, output_index: msgIdx, content_index: 0, delta: piece, logprobs: [] });
+            }
+            if (ch.delta?.tool_calls) tools.add(ch.delta.tool_calls);
+            if (ch.finish_reason) finish = ch.finish_reason;
+          });
+        } catch (err) {
+          streamError = err instanceof Error ? err.message : String(err);
+        }
+
+        if (streamError) {
+          const failed = baseResponse(respId, r.model, r, "failed");
+          (failed as { error: unknown }).error = { message: streamError, type: "api_error" };
+          emit("response.failed", { response: failed });
+          controller.close();
+          return;
+        }
 
         try {
           closeReasoning();

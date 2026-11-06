@@ -8,7 +8,7 @@
 
 import type { Env, Provider } from "./types";
 import { PROVIDERS } from "./types";
-import { listDueForProbe, markProbed, markAllDueForProbe, getProbeProgress, reactivateKey, applyOutcome, setKeyProjectId, setKeyBalance, setModelStatus, oneActiveKey } from "./db";
+import { listDueForProbe, markProbed, markAllDueForProbe, getProbeProgress, reactivateKey, applyOutcome, setKeyProjectId, setKeyBalance, setModelStatus, listModelStatus, oneActiveKey } from "./db";
 import { getAdapter } from "./providers";
 import { cooldownMinutes, MAX_CONSECUTIVE_FAILS } from "./keypool";
 
@@ -35,6 +35,14 @@ export interface ProbeResult {
   projectId?: string;
 }
 
+/** Free OpenRouter model that works on accounts that never purchased credits.
+ * The `:free`-suffixed models do NOT (they 404 with "unavailable for free"
+ * unless the account bought credits); this one does — verified live
+ * 2026-11-06: 200, cost 0, balance still 0. Used as the liveness probe for
+ * 0-balance keys. Deliberately NOT in the adapter's static model list: the
+ * model list is fetched live after entering a key, never hardcoded. */
+export const OPENROUTER_FREE_PROBE_MODEL = "stealth/crouton-alpha";
+
 /** Live-probe one key. OpenRouter/DeepSeek also return real balance. */
 export async function probeKey(provider: Provider, key: string): Promise<ProbeResult> {
   try {
@@ -45,8 +53,27 @@ export async function probeKey(provider: Provider, key: string): Promise<ProbeRe
       const total = j?.data?.total_credits ?? null;
       const usage = j?.data?.total_usage ?? null;
       const remaining = total !== null && usage !== null ? total - usage : null;
-      const alive = r.ok && (remaining === null || remaining > 0);
-      return { alive, status: r.status, rateLimited: false, balance: { remaining, total, usage, unit: "credits" }, error: alive ? undefined : "余额不足" };
+      const balance: KeyBalance = { remaining, total, usage, unit: "credits" };
+      if (r.ok && (remaining === null || remaining > 0)) {
+        return { alive: true, status: r.status, rateLimited: false, balance };
+      }
+      if (r.ok && remaining !== null && remaining <= 0) {
+        // 0 credits does NOT mean dead: the account may still serve free
+        // models. Prove it with a 1-token chat on the free model before
+        // calling the key dead — otherwise the sweep disables a usable key
+        // and the pool stays empty.
+        const free = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+          method: "POST",
+          headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+          body: JSON.stringify({ model: OPENROUTER_FREE_PROBE_MODEL, messages: [{ role: "user", content: "hi" }], max_tokens: 1 }),
+        });
+        if (free.status === 401 || free.status === 403) return { alive: false, status: free.status, rateLimited: false, balance, error: "invalid key" };
+        if (free.ok) return { alive: true, status: free.status, rateLimited: false, balance };
+        if (free.status === 429) return { alive: false, status: free.status, rateLimited: true, balance, error: "限流" };
+        const t = await free.text().catch(() => "");
+        return { alive: false, status: free.status, rateLimited: false, balance, error: snippet(t) || "余额不足" };
+      }
+      return { alive: false, status: r.status, rateLimited: false, balance, error: "余额不足" };
     }
     if (provider === "mistral") {
       const r = await fetch("https://api.mistral.ai/v1/models", { headers: { authorization: `Bearer ${key}` } });
@@ -64,7 +91,10 @@ export async function probeKey(provider: Provider, key: string): Promise<ProbeRe
       const info = j?.balance_infos?.[0] ?? null;
       const remaining = info && info.total_balance != null ? Number(info.total_balance) : null;
       const unit = info?.currency ?? "USD";
-      return { alive: true, status: r.status, rateLimited: false, balance: { remaining, total: null, usage: null, unit } };
+      // A key with 0 (or unparseable → NaN) balance is dead: the old code
+      // returned alive:true whenever the balance endpoint answered.
+      const alive = remaining === null ? true : Number.isFinite(remaining) && remaining > 0;
+      return { alive, status: r.status, rateLimited: false, balance: { remaining: Number.isFinite(remaining) ? remaining : null, total: null, usage: null, unit }, error: alive ? undefined : "余额不足" };
     }
     if (provider === "groq") {
       const r = await fetch("https://api.groq.com/openai/v1/models", { headers: { authorization: `Bearer ${key}` } });
@@ -74,7 +104,7 @@ export async function probeKey(provider: Provider, key: string): Promise<ProbeRe
       const r = await fetch("https://api.moonshot.cn/v1/chat/completions", {
         method: "POST",
         headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
-        body: JSON.stringify({ model: "moonshot-v1-8k", messages: [{ role: "user", content: "hi" }], max_tokens: 1 }),
+        body: JSON.stringify({ model: getAdapter(provider).models()[0] ?? "moonshot-v1-8k", messages: [{ role: "user", content: "hi" }], max_tokens: 1 }),
       });
       if (r.status === 401 || r.status === 403) return { alive: false, status: r.status, rateLimited: false, balance: null, error: "invalid key" };
       if (!r.ok) {
@@ -88,7 +118,7 @@ export async function probeKey(provider: Provider, key: string): Promise<ProbeRe
       const r = await fetch("https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions", {
         method: "POST",
         headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
-        body: JSON.stringify({ model: "qwen-turbo", messages: [{ role: "user", content: "hi" }], max_tokens: 1 }),
+        body: JSON.stringify({ model: getAdapter(provider).models()[0] ?? "qwen-turbo", messages: [{ role: "user", content: "hi" }], max_tokens: 1 }),
       });
       if (r.status === 401 || r.status === 403) return { alive: false, status: r.status, rateLimited: false, balance: null, error: "invalid key" };
       if (!r.ok) {
@@ -102,7 +132,7 @@ export async function probeKey(provider: Provider, key: string): Promise<ProbeRe
       const r = await fetch("https://open.bigmodel.cn/api/paas/v4/chat/completions", {
         method: "POST",
         headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
-        body: JSON.stringify({ model: "glm-4-flash", messages: [{ role: "user", content: "hi" }], max_tokens: 1 }),
+        body: JSON.stringify({ model: getAdapter(provider).models()[0] ?? "glm-4-flash", messages: [{ role: "user", content: "hi" }], max_tokens: 1 }),
       });
       if (r.status === 401 || r.status === 403) return { alive: false, status: r.status, rateLimited: false, balance: null, error: "invalid key" };
       return { alive: r.ok, status: r.status, rateLimited: r.status === 429, balance: null, error: r.ok ? undefined : `http ${r.status}` };
@@ -115,7 +145,7 @@ export async function probeKey(provider: Provider, key: string): Promise<ProbeRe
       const r = await fetch("https://api.deepinfra.com/v1/openai/chat/completions", {
         method: "POST",
         headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
-        body: JSON.stringify({ model: "meta-llama/Meta-Llama-3.1-8B-Instruct", messages: [{ role: "user", content: "hi" }], max_tokens: 1 }),
+        body: JSON.stringify({ model: getAdapter(provider).models()[0] ?? "meta-llama/Meta-Llama-3.1-8B-Instruct", messages: [{ role: "user", content: "hi" }], max_tokens: 1 }),
       });
       if (r.status === 401 || r.status === 403) return { alive: false, status: r.status, rateLimited: false, balance: null, error: "invalid key" };
       if (r.status === 402) return { alive: false, status: r.status, rateLimited: false, balance: null, error: "欠费/需付款" };
@@ -142,7 +172,7 @@ export async function probeKey(provider: Provider, key: string): Promise<ProbeRe
       const r = await fetch("https://api.ai21.com/studio/v1/chat/completions", {
         method: "POST",
         headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
-        body: JSON.stringify({ model: "jamba-mini", messages: [{ role: "user", content: "hi" }], max_tokens: 1 }),
+        body: JSON.stringify({ model: getAdapter(provider).models()[0] ?? "jamba-mini", messages: [{ role: "user", content: "hi" }], max_tokens: 1 }),
       });
       if (r.status === 401 || r.status === 403) return { alive: false, status: r.status, rateLimited: false, balance: null, error: "invalid key" };
       // 400/422 = auth ok, body quibble; still a live key.
@@ -224,7 +254,7 @@ export async function runSweep(
   env: Env,
   opts: { markAll?: boolean; limit?: number } = {}
 ): Promise<SweepResult> {
-  const limit = opts.limit ?? 48;
+  const limit = opts.limit ?? 24;
   if (opts.markAll) await markAllDueForProbe(env);
   const now = Date.now();
   const intervalMs = probeIntervalMs(env);
@@ -241,7 +271,7 @@ export async function runSweep(
           // Healthy: ensure active AND clear any stale last_error (e.g. a glm key
           // that errored on a paid model but works for the free one).
           await reactivateKey(env, k.id);
-        } else if (r.rateLimited && k.status === "active") {
+        } else if (r.rateLimited) {
           // Valid key but can't serve right now — cool it down so it shows as
           // 'cooldown' (not a misleading green 'active') and is skipped until it
           // recovers; inline revive brings it back when cooldown_until passes.
@@ -251,7 +281,7 @@ export async function runSweep(
             { kind: "cooldown", minutes: cooldownMinutes(env), reason: r.error || "rate limited" },
             { cooldownMinutes: cooldownMinutes(env), maxConsecutive: MAX_CONSECUTIVE_FAILS }
           );
-        } else if (!r.alive && !r.rateLimited && k.status === "active") {
+        } else if (!r.alive && !r.rateLimited) {
           await applyOutcome(
             env,
             k.id,
@@ -285,42 +315,74 @@ export function sweepProgress(env: Env): Promise<{ total: number; due: number }>
 }
 
 /**
- * Probe model-level availability: for each provider with an active key, send a
- * 1-token chat to each model. 2xx or 429 means the model itself works (just
- * throttled); any other non-2xx marks the model unavailable with a reason
- * snippet (e.g. glm '余额不足/无资源包', or a 404/400 model-not-found). Capped at
- * ~40 upstream calls and each call is isolated in try/catch so one failure
- * never aborts the sweep. Cheap enough to run from the health check.
+ * Probe model-level availability in two passes, capped at 24 upstream calls:
+ *   1. the models the user added via the key list (`model_status` rows) — the
+ *      ones /v1/models actually serves. Available rows first (confirm they're
+ *      still alive), blocked rows after (a revived model comes back).
+ *   2. the static per-provider catalog, skipping anything already probed.
+ * A 1-token chat: 2xx or 429 means the model itself works (just throttled);
+ * any other non-2xx marks it unavailable with a reason snippet (e.g. glm
+ * '余额不足/无资源包', or a 404/400 model-not-found). Each call is isolated
+ * in try/catch so one failure never aborts the sweep. Cheap enough to run
+ * from the health check.
  */
 export async function probeModels(env: Env): Promise<{ checked: number; blocked: number }> {
-  const MAX_CALLS = 40;
+  const MAX_CALLS = 24;
   let checked = 0;
   let blocked = 0;
-  for (const provider of PROVIDERS) {
-    if (checked >= MAX_CALLS) break;
-    const key = await oneActiveKey(env, provider);
-    if (!key) continue;
-    const adapter = getAdapter(provider);
-    const models = adapter.models().slice(0, Math.max(0, MAX_CALLS - checked));
-    for (const model of models) {
-      if (checked >= MAX_CALLS) break;
-      checked++;
-      try {
-        const r = await adapter.chatCompletions(
-          { model, messages: [{ role: "user", content: "hi" }], max_tokens: 1 },
-          key
-        );
-        if (r.ok || r.status === 429) {
-          await setModelStatus(env, model, provider, true, null);
-        } else {
-          const body = await r.text().catch(() => "");
-          await setModelStatus(env, model, provider, false, snippet(body) || `http ${r.status}`);
-          blocked++;
-        }
-      } catch (err) {
-        await setModelStatus(env, model, provider, false, snippet(String(err instanceof Error ? err.message : err)));
+  const probed = new Set<string>();
+  const keyCache = new Map<string, string | null>();
+  const keyFor = async (provider: Provider): Promise<string | null> => {
+    if (!keyCache.has(provider)) keyCache.set(provider, await oneActiveKey(env, provider));
+    return keyCache.get(provider) ?? null;
+  };
+  const probeOne = async (provider: Provider, model: string): Promise<void> => {
+    const k = provider + "\0" + model;
+    if (probed.has(k)) return;
+    probed.add(k);
+    if (checked >= MAX_CALLS) return;
+    const key = await keyFor(provider);
+    if (!key) return;
+    checked++;
+    try {
+      const r = await getAdapter(provider).chatCompletions(
+        { model, messages: [{ role: "user", content: "hi" }], max_tokens: 1 },
+        key
+      );
+      if (r.ok || r.status === 429) {
+        await setModelStatus(env, model, provider, true, null);
+      } else {
+        const body = await r.text().catch(() => "");
+        await setModelStatus(env, model, provider, false, snippet(body) || `http ${r.status}`);
         blocked++;
       }
+    } catch (err) {
+      await setModelStatus(env, model, provider, false, snippet(String(err instanceof Error ? err.message : err)));
+      blocked++;
+    }
+  };
+
+  // Pass 1: user-added models first — available before blocked.
+  const rows = await listModelStatus(env);
+  rows.sort(
+    (a, b) =>
+      b.available - a.available ||
+      (a.provider < b.provider ? -1 : a.provider > b.provider ? 1 : 0) ||
+      (a.model < b.model ? -1 : a.model > b.model ? 1 : 0)
+  );
+  for (const row of rows) {
+    if (checked >= MAX_CALLS) break;
+    if (!(PROVIDERS as string[]).includes(row.provider)) continue;
+    await probeOne(row.provider as Provider, row.model);
+  }
+
+  // Pass 2: static catalog, skipping anything already probed this run.
+  for (const provider of PROVIDERS) {
+    if (checked >= MAX_CALLS) break;
+    if (!(await keyFor(provider))) continue;
+    for (const model of getAdapter(provider).models()) {
+      if (checked >= MAX_CALLS) break;
+      await probeOne(provider, model);
     }
   }
   return { checked, blocked };

@@ -8,6 +8,7 @@
 
 import type { OpenAIChatRequest } from "./providers/types";
 import { effortFromBudget, normEffort } from "./reasoning";
+import { contentToText, ToolCallAccumulator } from "./sse";
 
 // ---------- request: Anthropic -> OpenAI ----------
 
@@ -46,11 +47,12 @@ function blocksToOpenAIContent(content: string | AnthropicBlock[]): OpenAIChatRe
         parts.push({ type: "image_url", image_url: { url: `data:${s.media_type};base64,${s.data}` } });
       }
     }
-    // tool_use / tool_result blocks are dropped (best-effort text bridge).
+    // tool_use / tool_result blocks are handled at message level in
+    // anthropicToOpenAI (they change the message shape, not just content).
   }
   // If every part is text, collapse to a plain string for max provider compatibility.
   if (parts.every((p) => p.type === "text")) {
-    return parts.map((p) => (p as { text: string }).text).join("");
+    return parts.map((p) => (p as { text: string }).text).join("\n");
   }
   return parts as unknown as OpenAIChatRequest["messages"][number]["content"];
 }
@@ -70,6 +72,45 @@ export function anthropicToOpenAI(a: AnthropicRequest): OpenAIChatRequest {
   const sys = systemToText(a.system);
   if (sys) messages.push({ role: "system", content: sys });
   for (const m of a.messages) {
+    const blocks = Array.isArray(m.content) ? m.content : null;
+    if (blocks) {
+      const toolUses = blocks.filter((b) => b?.type === "tool_use") as Array<{ type: "tool_use"; id?: string; name?: string; input?: unknown }>;
+      const toolResults = blocks.filter((b) => b?.type === "tool_result") as Array<{ type: "tool_result"; tool_use_id?: string; content?: unknown }>;
+      if (toolUses.length > 0) {
+        // Assistant turn that called tools: text (if any) + tool_calls.
+        const text = blocks
+          .filter((b) => b?.type === "text")
+          .map((b) => String((b as AnthropicTextBlock).text ?? ""))
+          .join("\n");
+        messages.push({
+          role: "assistant",
+          content: text || null,
+          tool_calls: toolUses.map((t) => ({
+            id: t.id ?? "",
+            type: "function" as const,
+            function: { name: t.name ?? "", arguments: JSON.stringify(t.input ?? {}) },
+          })),
+        } as unknown as OpenAIChatRequest["messages"][number]);
+        continue;
+      }
+      if (toolResults.length > 0) {
+        // Tool results become OpenAI `tool` messages; accompanying text
+        // stays a user message first (Anthropic allows both in one message).
+        const text = blocks
+          .filter((b) => b?.type === "text")
+          .map((b) => String((b as AnthropicTextBlock).text ?? ""))
+          .join("\n");
+        if (text) messages.push({ role: "user", content: text });
+        for (const tr of toolResults) {
+          messages.push({
+            role: "tool",
+            tool_call_id: tr.tool_use_id ?? "",
+            content: typeof tr.content === "string" ? tr.content : contentToText(tr.content),
+          } as unknown as OpenAIChatRequest["messages"][number]);
+        }
+        continue;
+      }
+    }
     messages.push({ role: m.role, content: blocksToOpenAIContent(m.content) });
   }
   const out: OpenAIChatRequest = {
@@ -105,7 +146,8 @@ function mapStopReason(finish: string | null | undefined): string {
   switch (finish) {
     case "length": return "max_tokens";
     case "tool_calls": return "tool_use";
-    case "content_filter": return "stop_sequence";
+    // A content-filter stop is a refusal, not a stop sequence.
+    case "content_filter": return "refusal";
     default: return "end_turn"; // "stop" / null
   }
 }
@@ -119,18 +161,35 @@ function msgId(): string {
 }
 
 interface OpenAICompletion {
-  choices?: Array<{ message?: { content?: unknown; reasoning_content?: unknown }; finish_reason?: string | null }>;
+  choices?: Array<{
+    message?: {
+      content?: unknown;
+      reasoning_content?: unknown;
+      tool_calls?: Array<{ id?: string; function?: { name?: string; arguments?: string } }>;
+    };
+    finish_reason?: string | null;
+  }>;
   usage?: { prompt_tokens?: number; completion_tokens?: number };
 }
 
 /** Translate a non-streaming OpenAI completion JSON into an Anthropic message. */
 export function openAIToAnthropic(oai: OpenAICompletion, model: string): unknown {
   const choice = oai.choices?.[0];
-  const text = typeof choice?.message?.content === "string" ? choice.message.content : "";
+  const text = contentToText(choice?.message?.content);
   const thinking = typeof choice?.message?.reasoning_content === "string" ? choice.message.reasoning_content : "";
   const content: unknown[] = [];
   if (thinking) content.push({ type: "thinking", thinking, signature: THINKING_SIGNATURE });
   content.push({ type: "text", text });
+  // Assistant tool calls become Anthropic tool_use blocks.
+  for (const tc of choice?.message?.tool_calls ?? []) {
+    let input: unknown = {};
+    try {
+      input = JSON.parse(tc.function?.arguments ?? "{}") as unknown;
+    } catch {
+      input = {};
+    }
+    content.push({ type: "tool_use", id: tc.id ?? "", name: tc.function?.name ?? "", input });
+  }
   return {
     id: msgId(),
     type: "message",
@@ -167,8 +226,14 @@ export function openAIStreamToAnthropic(upstream: ReadableStream<Uint8Array>, mo
   let outTokens = 0;
   let inTokens = 0;
   // Open content block: thinking (reasoning_content) comes first, then text.
-  let block: "thinking" | "text" | null = null;
+  let block: "thinking" | "text" | "tool_use" | null = null;
   let index = -1;
+  // Tool-call streaming: accumulate deltas per OpenAI index, one Anthropic
+  // tool_use block per call.
+  const toolAcc = new ToolCallAccumulator();
+  const toolMeta = new Map<number, { id: string; name: string }>();
+  let toolIndex: number | null = null;
+  let streamError: string | null = null;
   const reader = upstream.getReader();
 
   function emit(controller: ReadableStreamDefaultController<Uint8Array>, event: string, data: unknown) {
@@ -191,12 +256,20 @@ export function openAIStreamToAnthropic(upstream: ReadableStream<Uint8Array>, mo
     block = null;
   }
 
-  function openBlock(controller: ReadableStreamDefaultController<Uint8Array>, kind: "thinking" | "text") {
-    if (block === kind) return;
+  function openBlock(
+    controller: ReadableStreamDefaultController<Uint8Array>,
+    kind: "thinking" | "text" | "tool_use",
+    contentBlock?: unknown
+  ) {
+    // tool_use blocks are re-opened per call index (the caller only asks
+    // when the index changed); thinking/text dedupe on the same kind.
+    if (block === kind && kind !== "tool_use") return;
     closeBlock(controller);
     index++;
     block = kind;
-    const content_block = kind === "thinking" ? { type: "thinking", thinking: "", signature: "" } : { type: "text", text: "" };
+    const content_block =
+      contentBlock ??
+      (kind === "thinking" ? { type: "thinking", thinking: "", signature: "" } : { type: "text", text: "" });
     emit(controller, "content_block_start", { type: "content_block_start", index, content_block });
   }
 
@@ -206,10 +279,20 @@ export function openAIStreamToAnthropic(upstream: ReadableStream<Uint8Array>, mo
     const data = t.slice(5).trim();
     if (!data || data === "[DONE]") return;
     let obj: {
-      choices?: Array<{ delta?: { content?: string | null; reasoning_content?: string | null }; finish_reason?: string | null }>;
+      choices?: Array<{ delta?: { content?: string | null; reasoning_content?: string | null; tool_calls?: Array<{ index?: number; id?: string; function?: { name?: string; arguments?: string } }> }; finish_reason?: string | null }>;
       usage?: { prompt_tokens?: number; completion_tokens?: number };
+      error?: { message?: unknown; code?: unknown };
     };
     try { obj = JSON.parse(data); } catch { return; }
+    // An upstream error frame mid-stream must surface, not silently end
+    // the stream with a fake success.
+    if (obj.error && typeof obj.error === "object") {
+      throw new Error(
+        typeof obj.error.message === "string" && obj.error.message
+          ? obj.error.message
+          : "upstream stream error"
+      );
+    }
     if (obj.usage) {
       if (typeof obj.usage.prompt_tokens === "number") inTokens = obj.usage.prompt_tokens;
       if (typeof obj.usage.completion_tokens === "number") outTokens = obj.usage.completion_tokens;
@@ -225,6 +308,28 @@ export function openAIStreamToAnthropic(upstream: ReadableStream<Uint8Array>, mo
     if (typeof piece === "string" && piece.length) {
       openBlock(controller, "text");
       emit(controller, "content_block_delta", { type: "content_block_delta", index, delta: { type: "text_delta", text: piece } });
+    }
+    // Tool-call deltas: stream the arguments as input_json_delta events.
+    const toolDeltas = ch?.delta?.tool_calls;
+    if (toolDeltas && toolDeltas.length > 0) {
+      toolAcc.add(toolDeltas);
+      for (const d of toolDeltas) {
+        const i = d.index ?? 0;
+        if (d.id) toolMeta.set(i, { ...(toolMeta.get(i) ?? { id: "", name: "" }), id: d.id });
+        if (d.function?.name) toolMeta.set(i, { ...(toolMeta.get(i) ?? { id: "", name: "" }), name: (toolMeta.get(i)?.name ?? "") + d.function.name });
+        if (toolIndex !== i || block !== "tool_use") {
+          toolIndex = i;
+          const meta = toolMeta.get(i) ?? { id: d.id ?? "", name: d.function?.name ?? "" };
+          openBlock(controller, "tool_use", { type: "tool_use", id: meta.id, name: meta.name, input: {} });
+        }
+        if (d.function?.arguments) {
+          emit(controller, "content_block_delta", {
+            type: "content_block_delta",
+            index,
+            delta: { type: "input_json_delta", partial_json: d.function.arguments },
+          });
+        }
+      }
     }
     if (ch?.finish_reason) stopReason = mapStopReason(ch.finish_reason);
   }
@@ -242,10 +347,17 @@ export function openAIStreamToAnthropic(upstream: ReadableStream<Uint8Array>, mo
             for (const line of parts) handleLine(line, controller);
           }
           if (buf.trim()) handleLine(buf, controller);
-        } catch {
-          // fall through to always emit the terminating events
+        } catch (err) {
+          // An upstream error frame (or a read abort) surfaces as an
+          // Anthropic error event — not as a fake clean message_stop.
+          streamError = err instanceof Error ? err.message : String(err);
         }
         try {
+          if (streamError) {
+            emit(controller, "error", { type: "error", error: { type: "api_error", message: streamError } });
+            controller.close();
+            return;
+          }
           if (!started) startEvents(controller);
           if (index < 0) openBlock(controller, "text");
           closeBlock(controller);

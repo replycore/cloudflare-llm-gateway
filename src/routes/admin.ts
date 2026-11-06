@@ -29,7 +29,9 @@ import {
   billingEnabled,
   billingDiscount,
   listModelStatus,
+  listAvailableModels,
   setModelStatus,
+  normalizeModelKey,
 } from "../db";
 import { cooldownMinutes, MAX_CONSECUTIVE_FAILS } from "../keypool";
 import { runHealthCheck } from "../cron";
@@ -92,27 +94,15 @@ app.get("/providers/:provider/models", (c) => {
   }
 });
 
-// POST /providers/:provider/live-models — 用用户输入的 Key 实时去上游拉
-// 该 Provider 当前可用的模型列表（OpenAI 兼容 /models 风格）。
-// Body: { key: string }
-app.post("/providers/:provider/live-models", async (c) => {
-  const raw = c.req.param("provider") || "";
-  const provider = raw.trim().toLowerCase();
-  if (!isProvider(provider)) {
-    return c.json({ error: { message: "unknown provider", type: "invalid_request_error" } }, 400);
-  }
-  let body: unknown = null;
-  try {
-    body = await c.req.json();
-  } catch {
-    return c.json({ error: { message: "invalid json body", type: "invalid_request_error" } }, 400);
-  }
-  const key = (body as { key?: unknown } | null)?.key;
-  if (typeof key !== "string" || !key.trim()) {
-    return c.json({ error: { message: "expected { key: string }", type: "invalid_request_error" } }, 400);
-  }
-  const apiKey = key.trim();
+/** Shared live-model fetch: ask the provider's /models endpoint with a key
+ * and return the model ids (deduped; gemini "models/" prefix stripped).
+ * Used by POST /providers/:provider/live-models (key pasted by the admin)
+ * and POST /admin/keys/:id/live-models (key already stored). */
+type LiveModelsResult =
+  | { ok: true; models: string[] }
+  | { ok: false; status: number; message: string; type: string; upstreamStatus?: number };
 
+async function liveModelsFor(provider: Provider, apiKey: string): Promise<LiveModelsResult> {
   // provider -> { url, header }（Bearer 或 query 参数）
   const LIVE: Record<string, { url: string; auth: "bearer" | "query"; extraHeaders?: Record<string, string> }> = {
     openai:     { url: "https://api.openai.com/v1/models", auth: "bearer" },
@@ -134,10 +124,7 @@ app.post("/providers/:provider/live-models", async (c) => {
   };
   const cfg = LIVE[provider];
   if (!cfg || !cfg.url) {
-    return c.json(
-      { error: { message: `provider "${provider}" does not expose a /models live endpoint; showing the built-in list instead`, type: "invalid_request_error" } },
-      400
-    );
+    return { ok: false, status: 400, message: `provider "${provider}" does not expose a /models live endpoint; showing the built-in list instead`, type: "invalid_request_error" };
   }
   const headers: Record<string, string> = { ...(cfg.extraHeaders || {}) };
   let url = cfg.url;
@@ -151,29 +138,17 @@ app.post("/providers/:provider/live-models", async (c) => {
   try {
     upstream = await fetch(url, { headers, redirect: "follow" });
   } catch (e) {
-    return c.json(
-      { error: { message: `upstream fetch failed: ${e instanceof Error ? e.message : String(e)}`, type: "upstream_error" } },
-      502
-    );
+    return { ok: false, status: 502, message: `upstream fetch failed: ${e instanceof Error ? e.message : String(e)}`, type: "upstream_error" };
   }
   if (!upstream.ok) {
     const txt = (await upstream.text()).slice(0, 400);
-    return c.json(
-      {
-        error: {
-          message: `upstream returned ${upstream.status}: ${txt}`,
-          type: "upstream_error",
-          status: upstream.status,
-        },
-      },
-      502
-    );
+    return { ok: false, status: 502, message: `upstream returned ${upstream.status}: ${txt}`, type: "upstream_error", upstreamStatus: upstream.status };
   }
   let json: any;
   try {
     json = await upstream.json();
   } catch {
-    return c.json({ error: { message: "upstream did not return JSON", type: "upstream_error" } }, 502);
+    return { ok: false, status: 502, message: "upstream did not return JSON", type: "upstream_error" };
   }
 
   // 兼容两种返回形状并提取 id
@@ -189,16 +164,140 @@ app.post("/providers/:provider/live-models", async (c) => {
   if (Array.isArray(json)) rawList = json;
   else if (Array.isArray(json?.data)) rawList = json.data;
   else if (Array.isArray(json?.models)) rawList = json.models;
-  const models = Array.from(new Set(rawList.map(extract).filter((x): x is string => !!x)));
-  if (provider === "gemini") {
-    // google returns {"name":"models/gemini-2.0-flash"} — strip the prefix
-    for (const m of models) {
-      if (m.startsWith("models/")) {
-        models[models.indexOf(m)] = m.slice("models/".length);
-      }
-    }
+  // google returns {"name":"models/gemini-2.0-flash"} — strip the prefix
+  // BEFORE deduping, so a list containing both "models/x" and "x" doesn't
+  // return x twice.
+  const models = Array.from(
+    new Set(
+      rawList
+        .map(extract)
+        .filter((x): x is string => !!x)
+        .map((m) => (provider === "gemini" && m.startsWith("models/") ? m.slice("models/".length) : m))
+    )
+  );
+  return { ok: true, models };
+}
+
+// POST /providers/:provider/live-models — 用用户输入的 Key 实时去上游拉
+// 该 Provider 当前可用的模型列表（OpenAI 兼容 /models 风格）。
+// Body: { key: string }
+app.post("/providers/:provider/live-models", async (c) => {
+  const raw = c.req.param("provider") || "";
+  const provider = raw.trim().toLowerCase();
+  if (!isProvider(provider)) {
+    return c.json({ error: { message: "unknown provider", type: "invalid_request_error" } }, 400);
   }
-  return c.json({ provider, models, source: "live" });
+  let body: unknown = null;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: { message: "invalid json body", type: "invalid_request_error" } }, 400);
+  }
+  const key = (body as { key?: unknown } | null)?.key;
+  if (typeof key !== "string" || !key.trim()) {
+    return c.json({ error: { message: "expected { key: string }", type: "invalid_request_error" } }, 400);
+  }
+  const res = await liveModelsFor(provider as Provider, key.trim());
+  if (!res.ok) {
+    return c.json(
+      {
+        error: {
+          message: res.message,
+          type: res.type,
+          ...(res.upstreamStatus !== undefined ? { status: res.upstreamStatus } : {}),
+        },
+      },
+      res.status as 400 | 502
+    );
+  }
+  return c.json({ provider, models: res.models, source: "live" });
+});
+
+// POST /keys/:id/live-models — 用该 key 已存的凭证实时去上游拉模型列表
+// （key 列表里每行的「新增模型」按钮；不用再贴一次 key）。
+// 响应：{ provider, models, known, source: "live" }，known 是其中已经
+// 可服务的模型（内置列表或已入库可用），其余即新模型。
+app.post("/keys/:id/live-models", async (c) => {
+  const id = parseId(c.req.param("id"));
+  if (id === null) {
+    return c.json(
+      { error: { message: "invalid key id", type: "invalid_request_error" } },
+      400
+    );
+  }
+  const key = await getKeyById(c.env, id);
+  if (!key) {
+    return c.json({ error: { message: "key not found", type: "not_found" } }, 404);
+  }
+  const res = await liveModelsFor(key.provider, key.api_key);
+  if (!res.ok) {
+    return c.json(
+      {
+        error: {
+          message: res.message,
+          type: res.type,
+          ...(res.upstreamStatus !== undefined ? { status: res.upstreamStatus } : {}),
+        },
+      },
+      res.status as 400 | 502
+    );
+  }
+  const known = new Set<string>(getAdapter(key.provider).models());
+  for (const row of await listAvailableModels(c.env)) {
+    if (row.provider === key.provider) known.add(row.model);
+  }
+  return c.json({
+    provider: key.provider,
+    models: res.models,
+    known: res.models.filter((m) => known.has(m)),
+    source: "live",
+  });
+});
+
+// POST /keys/:id/models — 把从实时列表里挑出的模型记为可用（available=1），
+// 使其进入 /v1/models（servableModels 会并入 model_status 里 available=1 的行）。
+// Body: { models: string[] }
+app.post("/keys/:id/models", async (c) => {
+  const id = parseId(c.req.param("id"));
+  if (id === null) {
+    return c.json(
+      { error: { message: "invalid key id", type: "invalid_request_error" } },
+      400
+    );
+  }
+  const key = await getKeyById(c.env, id);
+  if (!key) {
+    return c.json({ error: { message: "key not found", type: "not_found" } }, 404);
+  }
+  let body: unknown = null;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: { message: "invalid json body", type: "invalid_request_error" } }, 400);
+  }
+  const raw = (body as { models?: unknown } | null)?.models;
+  if (!Array.isArray(raw)) {
+    return c.json({ error: { message: "expected { models: string[] }", type: "invalid_request_error" } }, 400);
+  }
+  const models = Array.from(
+    new Set(
+      raw
+        .filter((m): m is string => typeof m === "string")
+        .map((m) => m.trim())
+        .filter(Boolean)
+    )
+  ).slice(0, 200);
+  const already = new Set(
+    (await listAvailableModels(c.env))
+      .filter((r) => r.provider === key.provider)
+      .map((r) => r.model)
+  );
+  let added = 0;
+  for (const m of models) {
+    if (!already.has(m)) added++;
+    await setModelStatus(c.env, m, key.provider, true, null);
+  }
+  return c.json({ provider: key.provider, added, total: models.length, models });
 });
 
 // POST /keys/add — JSON { provider, api_key, models[] }: import one key and
@@ -224,19 +323,11 @@ app.post("/keys/add", async (c) => {
   }
   const selected = Array.isArray(b.models) ? b.models.filter((m): m is string => typeof m === "string") : [];
   const result = await importKeys(c.env, [{ provider: provider as Provider, api_key }]);
-  const adapter = getAdapter(provider as Provider);
-  const all = adapter.models();
-  const set = new Set(selected);
+  // The old code marked every model NOT in `selected` unavailable GLOBALLY
+  // (setModelStatus) — importing one key with a subset silently blocked those
+  // models for every other key of the provider too. Model selection is now
+  // recorded nowhere global; `blocked` stays [] to keep the response shape.
   const blocked: string[] = [];
-  for (const m of all) {
-    if (!set.has(m)) {
-      blocked.push(m);
-      await setModelStatus(c.env, m, provider, false, "blocked by admin");
-    } else {
-      // re-enable explicitly selected models (undo a previous block)
-      await setModelStatus(c.env, m, provider, true, null);
-    }
-  }
   return c.json({ added: result.added, duplicate: result.duplicate, provider, selected, blocked });
 });
 
@@ -346,6 +437,9 @@ app.post("/keys/:id/enable", async (c) => {
       400
     );
   }
+  if (!(await getKeyById(c.env, id))) {
+    return c.json({ error: { message: "key not found", type: "not_found" } }, 404);
+  }
   await reactivateKey(c.env, id);
   return c.json({ id, status: "active" });
 });
@@ -358,6 +452,9 @@ app.post("/keys/:id/disable", async (c) => {
       { error: { message: "invalid key id", type: "invalid_request_error" } },
       400
     );
+  }
+  if (!(await getKeyById(c.env, id))) {
+    return c.json({ error: { message: "key not found", type: "not_found" } }, 404);
   }
   await applyOutcome(
     c.env,
@@ -389,11 +486,27 @@ app.post("/tokens", async (c) => {
           rpm_limit?: unknown;
           expires_in_days?: unknown;
         };
-        if (typeof b.name === "string") opts.name = b.name;
+        // Name is capped (100 chars); quota/rpm must be positive integers
+        // (a fractional quota silently truncated downstream); expiry is
+        // capped at 10 years so a typo can't mint a forever token.
+        if (typeof b.name === "string") opts.name = b.name.slice(0, 100);
         if (b.role === "admin" || b.role === "user") opts.role = b.role;
-        if (typeof b.quota_requests === "number" && b.quota_requests > 0) opts.quotaRequests = b.quota_requests;
-        if (typeof b.rpm_limit === "number" && b.rpm_limit > 0) opts.rpmLimit = b.rpm_limit;
-        if (typeof b.expires_in_days === "number" && b.expires_in_days > 0) {
+        if (b.quota_requests !== undefined) {
+          if (typeof b.quota_requests !== "number" || !Number.isInteger(b.quota_requests) || b.quota_requests <= 0) {
+            return c.json({ error: { message: "quota_requests must be a positive integer", type: "invalid_request_error" } }, 400);
+          }
+          opts.quotaRequests = b.quota_requests;
+        }
+        if (b.rpm_limit !== undefined) {
+          if (typeof b.rpm_limit !== "number" || !Number.isInteger(b.rpm_limit) || b.rpm_limit <= 0) {
+            return c.json({ error: { message: "rpm_limit must be a positive integer", type: "invalid_request_error" } }, 400);
+          }
+          opts.rpmLimit = b.rpm_limit;
+        }
+        if (b.expires_in_days !== undefined) {
+          if (typeof b.expires_in_days !== "number" || !Number.isFinite(b.expires_in_days) || b.expires_in_days <= 0 || b.expires_in_days > 3650) {
+            return c.json({ error: { message: "expires_in_days must be between 0 and 3650", type: "invalid_request_error" } }, 400);
+          }
           opts.expiresAt = Date.now() + b.expires_in_days * 86400000;
         }
       }
@@ -439,7 +552,8 @@ app.post("/users/:id/approve", async (c) => {
       400
     );
   }
-  await setUserStatus(c.env, id, "approved");
+  const sub = await setUserStatus(c.env, id, "approved");
+  if (!sub) return c.json({ error: { message: "user not found", type: "not_found" } }, 404);
   return c.json({ ok: true });
 });
 
@@ -453,7 +567,8 @@ app.post("/users/:id/block", async (c) => {
     );
   }
   const sub = await setUserStatus(c.env, id, "blocked");
-  if (sub) await disableTokensByOwner(c.env, sub);
+  if (!sub) return c.json({ error: { message: "user not found", type: "not_found" } }, 404);
+  await disableTokensByOwner(c.env, sub);
   return c.json({ ok: true });
 });
 
@@ -615,7 +730,13 @@ app.get("/balances", async (c) => {
 
 // POST /balances/:sub/topup — credit a consumer's balance. Body { amount_usd, note? }.
 app.post("/balances/:sub/topup", async (c) => {
-  const sub = decodeURIComponent(c.req.param("sub"));
+  let sub: string;
+  try {
+    // A malformed % escape in the sub must be a 400, not an uncaught 500.
+    sub = decodeURIComponent(c.req.param("sub"));
+  } catch {
+    return c.json({ error: { message: "invalid sub", type: "invalid_request_error" } }, 400);
+  }
   let amountUsd = 0;
   let note: string | null = null;
   try {
@@ -637,7 +758,16 @@ app.post("/balances/:sub/topup", async (c) => {
       400
     );
   }
-  const balance_micro = await topUpMicro(c.env, sub, Math.round(amountUsd * 1_000_000), note);
+  let balance_micro: number;
+  try {
+    balance_micro = await topUpMicro(c.env, sub, Math.round(amountUsd * 1_000_000), note);
+  } catch (err) {
+    // topUpMicro throws on a missing user — that used to surface as a 500.
+    if (err instanceof Error && err.message === "user not found") {
+      return c.json({ error: { message: "user not found", type: "not_found" } }, 404);
+    }
+    throw err;
+  }
   return c.json({ balance_micro });
 });
 
@@ -702,6 +832,10 @@ app.post("/prices", async (c) => {
     if (!Number.isFinite(input)) input = legacy;
     if (!Number.isFinite(output)) output = legacy;
   }
+  // Normalize the model name (strip `provider:` prefix, lowercase, trim) so
+  // the stored row matches what priceForModel looks up — an admin entering
+  // "Groq:llama-3.3-70b-versatile" used to create a row billing never hit.
+  model = normalizeModelKey(model);
   if (
     model.length === 0 ||
     !Number.isFinite(input) ||

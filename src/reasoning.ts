@@ -16,6 +16,7 @@
 
 import type { Provider } from "./types";
 import type { OpenAIChatRequest } from "./providers/types";
+import { stripProviderPrefix } from "./providers/types";
 
 export type Effort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 const EFFORTS: Effort[] = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
@@ -48,13 +49,19 @@ export function budgetFromEffort(e: Effort): number {
   }
 }
 
-/** Model ids the gateway knows can think; drives `/v1/models` metadata and "auto". */
+/** Model ids the gateway knows can think; drives `/v1/models` metadata and "auto".
+ *  The provider prefix is stripped first: `groq:qwen3-32b` must match the
+ *  qwen3 rule, not fall through because of the `groq:` prefix. */
 export function canReason(model: string): boolean {
-  const m = (model || "").toLowerCase();
+  const m = stripProviderPrefix(model || "").toLowerCase();
   return (
     m === "auto" ||
     m.startsWith("deepseek-chat") ||
     m.startsWith("deepseek-reasoner") ||
+    m.startsWith("deepseek-r1") ||
+    m.startsWith("qwen3") ||
+    m.startsWith("gpt-oss") ||
+    m.includes("magistral") ||
     /^glm-(4\.[5-9]|[5-9])/.test(m) ||
     m.includes("thinking") ||
     /^o[1-9]/.test(m) ||
@@ -103,7 +110,9 @@ export function applyReasoning(provider: Provider, body: OpenAIChatRequest): Ope
   const out = { ...body } as Record<string, unknown>;
   const effort = normEffort(out.reasoning_effort);
   delete out.reasoning_effort;
-  const model = String(out.model || "").toLowerCase();
+  // Strip a `provider:` routing prefix before the model checks below:
+  // `groq:qwen3-32b` is a qwen3 model, `deepseek:deepseek-r1` a reasoner.
+  const model = stripProviderPrefix(String(out.model || "")).toLowerCase();
   if (!effort) {
     // glm-4.5+ thinks by default (22s on a one-line question, verified): when
     // the caller didn't ask for thinking — e.g. "auto" landed here — turn it
@@ -156,9 +165,15 @@ const RENAME_REASONING = new Set<string>(["openrouter", "groq", "cerebras", "fir
 
 function renameInPlace(obj: Record<string, unknown> | undefined): void {
   if (!obj) return;
-  if (typeof obj.reasoning === "string" && obj.reasoning_content == null) obj.reasoning_content = obj.reasoning;
+  // Only fold `reasoning` into `reasoning_content` when it is actually a
+  // string (the upstream's thinking text). `reasoning_details` is dropped
+  // only in that same case — deleting it unconditionally threw away the
+  // provider's structured thinking whenever `reasoning` was absent.
+  if (typeof obj.reasoning === "string" && obj.reasoning_content == null) {
+    obj.reasoning_content = obj.reasoning;
+    delete obj.reasoning_details;
+  }
   delete obj.reasoning;
-  delete obj.reasoning_details;
 }
 
 /**

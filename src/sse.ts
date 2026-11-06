@@ -20,7 +20,12 @@ export interface OpenAIChunk {
 
 /**
  * Read an OpenAI SSE body and call `onChunk` for every parsed
- * `chat.completion.chunk`. Resolves when the upstream ends (or errors).
+ * `chat.completion.chunk`. Resolves when the upstream ends.
+ *
+ * An upstream error frame (`{"error": {...}}` mid-stream) or a read error is
+ * NOT swallowed: the error is thrown so the caller can surface it instead of
+ * ending the stream with a fake success (the old code silently completed the
+ * stream, leaving the client with a truncated answer and no error).
  */
 export async function forEachOpenAIChunk(
   upstream: ReadableStream<Uint8Array>,
@@ -34,11 +39,22 @@ export async function forEachOpenAIChunk(
     if (!t.startsWith("data:")) return;
     const data = t.slice(5).trim();
     if (!data || data === "[DONE]") return;
+    let parsed: unknown;
     try {
-      onChunk(JSON.parse(data) as OpenAIChunk);
+      parsed = JSON.parse(data);
     } catch {
       /* skip malformed frame */
+      return;
     }
+    const err = (parsed as { error?: { message?: unknown; code?: unknown } }).error;
+    if (err && typeof err === "object") {
+      throw new Error(
+        typeof err.message === "string" && err.message
+          ? err.message
+          : `upstream stream error${typeof err.code === "string" ? `: ${err.code}` : ""}`
+      );
+    }
+    onChunk(parsed as OpenAIChunk);
   };
   try {
     for (;;) {
@@ -50,8 +66,12 @@ export async function forEachOpenAIChunk(
       for (const l of lines) handle(l);
     }
     if (buf.trim()) handle(buf);
-  } catch {
-    /* upstream aborted — let the caller emit its terminating events */
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch {
+      /* already released */
+    }
   }
 }
 
@@ -83,9 +103,33 @@ export function randomHex(bytes: number): string {
   return hex;
 }
 
+/**
+ * Collapse a message's content — plain string or an array of content parts —
+ * into one text string. Non-text parts (images, files) contribute nothing.
+ * Shared by the Anthropic, Responses and Gemini translators so the three
+ * don't drift (they previously joined with different separators, or counted
+ * image parts).
+ */
+export function contentToText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((p) => {
+        if (typeof p === "string") return p;
+        if (p && typeof p === "object") {
+          const part = p as { type?: unknown; text?: unknown };
+          if (typeof part.text === "string") return part.text;
+        }
+        return "";
+      })
+      .filter(Boolean)
+      .join("\n");
+  }
+  return "";
+}
+
 /** Pull a readable message out of an OpenAI-shaped error response. */
-export async function upstreamErrorMessage(res: Response): Promise<string> {
-  const text = await res.text().catch(() => "");
+export async function upstreamErrorMessage(res: Response): Promise<string> {  const text = await res.text().catch(() => "");
   try {
     return (JSON.parse(text) as { error?: { message?: string } }).error?.message ?? text;
   } catch {

@@ -41,13 +41,9 @@ export function classifyError(status: number, bodyText: string): Outcome {
 
   const body = bodyText || "";
 
-  if (status === 401 || status === 403 || DISABLE_RE.test(body)) {
-    return {
-      kind: "disable",
-      reason: `http ${status}: ${snippet(body)}`,
-    };
-  }
-
+  // Rate-limit / quota first: a 429 (or a quota-flavored 400) whose body
+  // happens to mention "insufficient balance" must cool down, not disable
+  // the key — disabling it for a quota error loses a healthy key.
   if (status === 429 || (status === 400 && COOLDOWN_RE.test(body))) {
     // A per-DAY quota won't recover for hours; cool it down long so it doesn't
     // flap green->429->green. A per-minute limit uses the short default (minutes:0).
@@ -55,6 +51,16 @@ export function classifyError(status: number, bodyText: string): Outcome {
     return {
       kind: "cooldown",
       minutes: daily ? DAILY_COOLDOWN_MINUTES : 0, // 0 = filled by caller (short)
+      reason: `http ${status}: ${snippet(body)}`,
+    };
+  }
+
+  // 401/403 disable the key ONLY when the body actually says the credential
+  // is bad. A 403 for any other reason (policy, region, content) is a caller
+  // problem, not a dead key — disabling on it burns healthy keys.
+  if (status === 401 || (status === 403 && DISABLE_RE.test(body))) {
+    return {
+      kind: "disable",
       reason: `http ${status}: ${snippet(body)}`,
     };
   }
@@ -102,12 +108,20 @@ export function extractUsage(jsonOrFrame: unknown): ExtractedUsage {
     | undefined;
 
   if (o && o.usage) {
-    const u = o.usage;
-    return {
-      prompt: typeof u.prompt_tokens === "number" ? u.prompt_tokens : null,
-      completion: typeof u.completion_tokens === "number" ? u.completion_tokens : null,
-      total: typeof u.total_tokens === "number" ? u.total_tokens : null,
+    const u = o.usage as {
+      prompt_tokens?: unknown;
+      completion_tokens?: unknown;
+      total_tokens?: unknown;
+      input_tokens?: unknown;
+      output_tokens?: unknown;
     };
+    // Anthropic-shaped usage ({input_tokens, output_tokens}) can reach here
+    // from an untranslated frame; map it to the OpenAI names.
+    const prompt = typeof u.prompt_tokens === "number" ? u.prompt_tokens
+      : typeof u.input_tokens === "number" ? u.input_tokens : null;
+    const completion = typeof u.completion_tokens === "number" ? u.completion_tokens
+      : typeof u.output_tokens === "number" ? u.output_tokens : null;
+    return { prompt, completion, total: typeof u.total_tokens === "number" ? u.total_tokens : null };
   }
 
   if (o && o.usageMetadata) {
@@ -125,6 +139,35 @@ export function extractUsage(jsonOrFrame: unknown): ExtractedUsage {
 /** True when an extracted usage carries at least one token count. */
 function hasUsage(u: ExtractedUsage): boolean {
   return u.prompt !== null || u.completion !== null || u.total !== null;
+}
+
+/**
+ * Split a partial usage object into billable prompt/completion counts.
+ * Upstreams often send only some fields: total-only, prompt+total, or
+ * completion+total. The missing side is derived from the total minus the
+ * known side; when even that is impossible, prompt is estimated from the
+ * request character count and completion from the response character count
+ * (~4 chars/token). `estimated` is true whenever any side was derived.
+ */
+export function splitUsage(
+  u: ExtractedUsage,
+  promptChars: number | null,
+  completionChars: number | null
+): { prompt: number; completion: number; total: number; estimated: boolean } {
+  let prompt = u.prompt;
+  let completion = u.completion;
+  if (prompt === null && u.total !== null && completion !== null) prompt = u.total - completion;
+  if (completion === null && u.total !== null && prompt !== null) completion = u.total - prompt;
+  if (prompt === null) prompt = promptChars ? Math.ceil(promptChars / 4) : 0;
+  if (completion === null) completion = completionChars !== null ? Math.ceil(completionChars / 4) : 0;
+  prompt = Math.max(0, prompt);
+  completion = Math.max(0, completion);
+  return {
+    prompt,
+    completion,
+    total: u.total ?? prompt + completion,
+    estimated: u.prompt === null || u.completion === null,
+  };
 }
 
 /**
@@ -149,6 +192,11 @@ export async function callWithPool(
      *  owns writing the single final row — used by the fallback chain so one
      *  user request isn't counted once per attempted provider). Default true. */
     finalOnFailure?: boolean;
+    /** Called by the background stream scan AFTER it has charged the owner.
+     *  Used by callers that hold a balance reserve (serveChat/passthrough):
+     *  the hold must stay locked until the actual charge lands, otherwise a
+     *  concurrent request can spend money the scan is about to charge. */
+    onStreamCharged?: () => Promise<void>;
   }
 ): Promise<Response> {
   const model = meta?.model ?? null;
@@ -252,7 +300,8 @@ export async function callWithPool(
           logId,
           ownerSub,
           model,
-          promptChars
+          promptChars,
+          meta?.onStreamCharged
         );
         if (ctx) {
           ctx.waitUntil(scan);
@@ -264,6 +313,7 @@ export async function callWithPool(
 
       // Non-streaming body: bill from the usage object when present, else
       // estimate from prompt + response character counts (~4 chars/token).
+      // Partial usage (total-only, prompt-only, ...) is split by splitUsage.
       let usage: ExtractedUsage = { prompt: null, completion: null, total: null };
       try {
         usage = extractUsage(await res.clone().json());
@@ -271,25 +321,19 @@ export async function callWithPool(
         // not JSON / parse error — fall through to estimation
       }
 
-      let promptTokens: number;
-      let completionTokens: number;
-      let estimated: boolean;
-      if (hasUsage(usage)) {
-        promptTokens = usage.prompt ?? 0;
-        completionTokens = usage.completion ?? 0;
-        estimated = false;
-      } else {
-        estimated = true;
-        promptTokens = promptChars ? Math.ceil(promptChars / 4) : 0;
-        let completionChars = 0;
+      let completionChars: number | null = null;
+      if (usage.completion === null) {
         try {
           completionChars = (await res.clone().text()).length;
         } catch {
           completionChars = 0;
         }
-        completionTokens = Math.ceil(completionChars / 4);
       }
-      const totalTokens = usage.total ?? promptTokens + completionTokens;
+      const s = splitUsage(usage, promptChars, completionChars);
+      const promptTokens = s.prompt;
+      const completionTokens = s.completion;
+      const estimated = s.estimated;
+      const totalTokens = s.total;
 
       await logRequest(env, {
         provider,
@@ -366,7 +410,8 @@ async function scanStreamForUsage(
   logId: number | null,
   ownerSub: string | null,
   model: string | null,
-  promptChars: number | null
+  promptChars: number | null,
+  onCharged?: () => Promise<void>
 ): Promise<void> {
   const reader = stream.getReader();
   const decoder = new TextDecoder();
@@ -392,6 +437,21 @@ async function scanStreamForUsage(
           if (typeof dc === "string") contentChars += dc.length;
         }
       }
+      // Gemini-shaped frames that leak through untranslated: candidates' parts text.
+      const cands = (obj as { candidates?: Array<{ content?: { parts?: Array<{ text?: unknown }> } }> }).candidates;
+      if (Array.isArray(cands)) {
+        for (const c of cands) {
+          const parts = c?.content?.parts;
+          if (Array.isArray(parts)) {
+            for (const p of parts) {
+              if (typeof p?.text === "string") contentChars += p.text.length;
+            }
+          }
+        }
+      }
+      // Anthropic-shaped frames: content_block_delta delta.text.
+      const delta = (obj as { delta?: { text?: unknown } }).delta;
+      if (delta && typeof delta.text === "string") contentChars += delta.text.length;
     } catch {
       // non-JSON data line; ignore
     }
@@ -432,24 +492,25 @@ async function scanStreamForUsage(
     }
   }
 
-  if (usage !== null) {
-    const found: ExtractedUsage = usage;
-    const prompt = found.prompt ?? 0;
-    const completion = found.completion ?? 0;
-    const total = found.total ?? prompt + completion;
+  const s = splitUsage(
+    usage ?? { prompt: null, completion: null, total: null },
+    promptChars,
+    contentChars > 0 ? contentChars : totalChars
+  );
+  try {
     if (logId !== null) {
-      await updateLogUsage(env, logId, prompt, completion, total);
+      await updateLogUsage(env, logId, s.prompt, s.completion, s.total);
     }
-    await chargeForUsage(env, ownerSub, model, prompt, completion, false);
-  } else {
-    const prompt = promptChars ? Math.ceil(promptChars / 4) : 0;
-    const completionChars = contentChars > 0 ? contentChars : totalChars;
-    const completion = Math.ceil(completionChars / 4);
-    const total = prompt + completion;
-    if (logId !== null) {
-      await updateLogUsage(env, logId, prompt, completion, total);
+    await chargeForUsage(env, ownerSub, model, s.prompt, s.completion, s.estimated);
+  } finally {
+    // Release the caller's balance hold only now that the charge has landed.
+    if (onCharged) {
+      try {
+        await onCharged();
+      } catch {
+        // hold release is best-effort; the charge already landed
+      }
     }
-    await chargeForUsage(env, ownerSub, model, prompt, completion, true);
   }
 }
 

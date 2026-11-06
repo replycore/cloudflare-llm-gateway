@@ -128,7 +128,20 @@ export async function serveChat(
   const provider = routeModelToProvider(body.model);
   const promptChars = (body.messages ?? []).reduce((sum, m) => {
     const content: unknown = m.content;
-    return sum + (typeof content === "string" ? content.length : JSON.stringify(content).length);
+    if (typeof content === "string") return sum + content.length;
+    // Content-part arrays: count TEXT parts only. Image parts carry base64
+    // (tens of KB per image) — counting them would inflate the billing
+    // reserve and the prompt-token estimate by orders of magnitude.
+    if (Array.isArray(content)) {
+      return (
+        sum +
+        content.reduce((s, p) => {
+          const part = p as { type?: unknown; text?: unknown };
+          return s + (part && part.type === "text" && typeof part.text === "string" ? part.text.length : 0);
+        }, 0)
+      );
+    }
+    return sum;
   }, 0);
 
   const billing = billingEnabled(env) && !!caller.ownerSub;
@@ -137,6 +150,9 @@ export async function serveChat(
       ? (body as { max_tokens: number }).max_tokens
       : null;
   let hold = 0;
+  // Whether the response that left the try block was a stream: the finally
+  // below must not release the hold for streams (the background scan does).
+  let streamed = false;
   if (billing) {
     hold = await estimateMaxCostMicro(env, body.model, promptChars, maxTokens);
     if (!(await reserveBalance(env, caller.ownerSub as string, hold))) {
@@ -161,7 +177,10 @@ export async function serveChat(
       order = cands.map((c) => c.p);
       if (!allowFallback) order = order.slice(0, 1);
     } else if (allowFallback) {
-      const others = PROVIDERS.filter((p) => p !== provider && avail.has(p));
+      // Fallback providers must have a real fallback model: elevenlabs and
+      // stability have no chat model (FALLBACK_MODEL is ""), so sending them
+      // an empty model would fail pointlessly.
+      const others = PROVIDERS.filter((p) => p !== provider && avail.has(p) && FALLBACK_MODEL[p]);
       const priced = await Promise.all(
         others.map(async (p) => ({ p, price: (await priceForModel(env, FALLBACK_MODEL[p])).output }))
       );
@@ -173,6 +192,11 @@ export async function serveChat(
     let servedBy: Provider = provider;
     let servedModel = body.model;
     let fellBack = false;
+    // Hold release for streaming: the reserve stays locked until the
+    // background scan has charged the real usage (see onStreamCharged).
+    const releaseHold = billing && hold > 0
+      ? () => refundBalance(env, caller.ownerSub as string, hold)
+      : undefined;
     for (let i = 0; i < order.length; i++) {
       const prov = order[i];
       const adapter = getAdapter(prov);
@@ -186,22 +210,43 @@ export async function serveChat(
         prov,
         prov === provider && !auto ? { ...body, max_tokens: clamped } : { ...body, model: useModel, max_tokens: clamped }
       );
-      res = await callWithPool(env, prov, (key) => adapter.chatCompletions(reqBody, key), {
-        model: useModel,
-        tokenId: caller.tokenId,
-        ownerSub: caller.ownerSub,
-        ctx,
-        promptChars,
-        finalOnFailure: false,
-        maxKeys: i === 0 ? undefined : 2,
-      });
+      // Ask for a usage frame in the stream so the scan can bill exact
+      // tokens instead of estimating from character counts.
+      if ((reqBody as { stream?: unknown }).stream) {
+        (reqBody as { stream_options?: unknown }).stream_options = { include_usage: true };
+      }
+      try {
+        res = await callWithPool(env, prov, (key) => adapter.chatCompletions(reqBody, key), {
+          model: useModel,
+          tokenId: caller.tokenId,
+          ownerSub: caller.ownerSub,
+          ctx,
+          promptChars,
+          finalOnFailure: false,
+          maxKeys: i === 0 ? undefined : 2,
+          onStreamCharged: releaseHold,
+        });
+      } catch (err) {
+        // callWithPool throwing (DB/pool failure) must not become an unhandled
+        // 500: return a JSON error for this attempt and stop the chain.
+        res = new Response(
+          JSON.stringify({ error: { message: `pool error: ${err instanceof Error ? err.message : String(err)}`, type: "pool_error" } }),
+          { status: 502, headers: { "content-type": "application/json" } }
+        );
+        break;
+      }
       if (res.status >= 200 && res.status <= 299) {
         res = await normalizeReasoningResponse(prov, res);
         servedBy = prov;
         servedModel = useModel;
         fellBack = i > 0 && !auto;
+        streamed = (res.headers.get("content-type") || "").includes("text/event-stream");
         break;
       }
+      // Fall back only on retryable failures (429 / 5xx / pool-exhausted 503).
+      // Any other 4xx is a caller error (bad model, bad params) — another
+      // provider would reject the same request, so stop and return it.
+      if (res.status !== 429 && res.status < 500) break;
     }
 
     if (!res) {
@@ -230,6 +275,10 @@ export async function serveChat(
     }
     return res;
   } finally {
-    if (billing && hold > 0) await refundBalance(env, caller.ownerSub as string, hold);
+    // Non-streaming: the real charge already landed inside callWithPool, so
+    // the reserve can be released now. Streaming: the charge lands later in
+    // the background scan, which releases the hold via onStreamCharged —
+    // releasing here would let a concurrent request spend the same money.
+    if (billing && hold > 0 && !streamed) await refundBalance(env, caller.ownerSub as string, hold);
   }
 }

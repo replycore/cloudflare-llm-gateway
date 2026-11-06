@@ -1,6 +1,7 @@
 /** OpenRouter adapter — OpenAI-compatible (thin) + native passthrough. */
 
 import type { OpenAIChatRequest, ProviderAdapter } from "./types";
+import { stripProviderPrefix } from "./types";
 
 const BASE = "https://openrouter.ai/api";
 const REFERER = "https://keypool.local";
@@ -24,6 +25,8 @@ const openrouter: ProviderAdapter = {
   },
 
   async chatCompletions(req: OpenAIChatRequest, key: string): Promise<Response> {
+    // A routed id like "openrouter:deepseek/deepseek-chat" is stripped first.
+    const body: OpenAIChatRequest = { ...req, model: stripProviderPrefix(req.model) };
     return fetch(`${BASE}/v1/chat/completions`, {
       method: "POST",
       headers: {
@@ -32,7 +35,7 @@ const openrouter: ProviderAdapter = {
         "HTTP-Referer": REFERER,
         "X-Title": TITLE,
       },
-      body: JSON.stringify(req),
+      body: JSON.stringify(body),
     });
   },
 
@@ -47,6 +50,7 @@ const openrouter: ProviderAdapter = {
     headers.delete("content-length");
     headers.delete("cookie");
     headers.delete("x-goog-api-key");
+    headers.delete("x-api-key");
 
     const method = req.method.toUpperCase();
     const hasBody = method !== "GET" && method !== "HEAD";

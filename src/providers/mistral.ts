@@ -1,6 +1,7 @@
 /** Mistral adapter. Mistral's API is OpenAI-compatible, so this is thin. */
 
 import type { OpenAIChatRequest, ProviderAdapter } from "./types";
+import { stripProviderPrefix } from "./types";
 
 const BASE_URL = "https://api.mistral.ai";
 
@@ -21,6 +22,8 @@ const mistralAdapter: ProviderAdapter = {
   async chatCompletions(req: OpenAIChatRequest, key: string): Promise<Response> {
     // Mistral's /v1/chat/completions is OpenAI-compatible: forward the body
     // mostly as-is. Streaming (text/event-stream) passes through untouched.
+    // A routed id like "mistral:mistral-large-latest" is stripped first.
+    const body: OpenAIChatRequest = { ...req, model: stripProviderPrefix(req.model) };
     return fetch(`${BASE_URL}/v1/chat/completions`, {
       method: "POST",
       headers: {
@@ -28,7 +31,7 @@ const mistralAdapter: ProviderAdapter = {
         Accept: req.stream ? "text/event-stream" : "application/json",
         Authorization: `Bearer ${key}`,
       },
-      body: JSON.stringify(req),
+      body: JSON.stringify(body),
     });
   },
 
@@ -43,6 +46,7 @@ const mistralAdapter: ProviderAdapter = {
     headers.delete("content-length");
     headers.delete("cookie");
     headers.delete("x-goog-api-key");
+    headers.delete("x-api-key");
 
     const method = req.method.toUpperCase();
     const hasBody = method !== "GET" && method !== "HEAD";

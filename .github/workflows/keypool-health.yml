@@ -1,10 +1,10 @@
 name: keypool health check
 
-# Background key health-check: drains one rotating sweep batch (~48 due keys),
+# Background key health-check: drains one rotating sweep batch (~24 due keys),
 # reviving recovered ones / disabling dead ones, then refreshes model status.
 # Use this when the Cloudflare cron-trigger slots are full.
 #
-# At large pool sizes one batch per run rotates slowly (≈ pool/48 runs to cover
+# At large pool sizes one batch per run rotates slowly (≈ pool/24 runs to cover
 # everything). For faster coverage point a 1-minute pinger (cron-job.org) at the
 # same POST $KEYPOOL_URL/admin/sweep endpoint — both share the rotation cursor.
 #
@@ -29,7 +29,7 @@ jobs:
           if [ -z "$KEYPOOL_URL" ] || [ -z "$KEYPOOL_ADMIN_TOKEN" ]; then
             echo "Set KEYPOOL_URL and KEYPOOL_ADMIN_TOKEN repo secrets."; exit 1
           fi
-          curl -sS -X POST "$KEYPOOL_URL/admin/sweep" \
+          curl -sS --fail -X POST "$KEYPOOL_URL/admin/sweep" \
             -H "Authorization: Bearer $KEYPOOL_ADMIN_TOKEN" --max-time 110
-          curl -sS -X POST "$KEYPOOL_URL/admin/probe-models" \
+          curl -sS --fail -X POST "$KEYPOOL_URL/admin/probe-models" \
             -H "Authorization: Bearer $KEYPOOL_ADMIN_TOKEN" --max-time 110

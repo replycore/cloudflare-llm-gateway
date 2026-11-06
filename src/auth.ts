@@ -103,13 +103,21 @@ function makeAuth(adminOnly: boolean): MiddlewareHandler<AuthEnv> {
     // Else fall back to the SSO session cookie (browser). A non-admin session
     // must belong to an APPROVED user — this enforces the admin-approval gate
     // and instantly cuts off a blocked user (the JWT alone is not enough).
+    // An admin session is checked the same way against the DB: a 7-day JWT
+    // whose role claim says "admin" must not survive the admin being blocked
+    // or demoted in the meantime.
     if (!role) {
       const sess = await getSession(c.env, c.req.raw);
       if (sess) {
+        const u = await getUserBySub(c.env, sess.sub);
         if (sess.role === "admin") {
+          if (!u || u.status !== "approved" || u.role !== "admin") {
+            return forbidden(
+              u && u.status === "blocked" ? "账号已停用" : "账号待开通,请联系管理员"
+            );
+          }
           role = "admin";
         } else {
-          const u = await getUserBySub(c.env, sess.sub);
           if (!u || u.status !== "approved") {
             return forbidden(
               u && u.status === "blocked" ? "账号已停用" : "账号待开通,请联系管理员"

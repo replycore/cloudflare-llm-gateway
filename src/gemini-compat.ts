@@ -6,7 +6,7 @@
  */
 
 import type { OpenAIChatRequest } from "./providers/types";
-import { forEachOpenAIChunk, ToolCallAccumulator } from "./sse";
+import { contentToText, forEachOpenAIChunk, ToolCallAccumulator } from "./sse";
 import { effortFromBudget, normEffort } from "./reasoning";
 
 // ---------- request: Gemini -> Chat ----------
@@ -29,12 +29,16 @@ export interface GeminiRequest {
     maxOutputTokens?: number;
     stopSequences?: string[];
     thinkingConfig?: { thinkingBudget?: number; thinkingLevel?: string; includeThoughts?: boolean };
+    /** Structured output: maps to chat `response_format`. */
+    responseMimeType?: string;
+    responseSchema?: unknown;
+    presencePenalty?: number;
   };
   tools?: Array<{ functionDeclarations?: Array<{ name?: string; description?: string; parameters?: unknown; parametersJsonSchema?: unknown }> }>;
 }
 
 function partsText(parts: GeminiPart[] | undefined): string {
-  return (parts ?? []).filter((p) => typeof p.text === "string" && !p.thought).map((p) => p.text).join("");
+  return (parts ?? []).filter((p) => typeof p.text === "string" && !p.thought).map((p) => p.text).join("\n");
 }
 
 export function geminiToChat(g: GeminiRequest, model: string, stream: boolean): OpenAIChatRequest {
@@ -64,11 +68,12 @@ export function geminiToChat(g: GeminiRequest, model: string, stream: boolean): 
       if (typeof p.text === "string" && !p.thought) content.push({ type: "text", text: p.text });
       else if (p.inlineData?.data && p.inlineData.mimeType?.startsWith("image/")) {
         content.push({ type: "image_url", image_url: { url: `data:${p.inlineData.mimeType};base64,${p.inlineData.data}` } });
-      } else if (p.fileData?.fileUri) {
-        content.push({ type: "image_url", image_url: { url: p.fileData.fileUri } });
       }
+      // fileData.fileUri is NOT a fetchable URL (it's a Files API reference
+      // like "files/abc") — the old code passed it through as an image_url
+      // and the upstream silently failed or ignored it. Dropped.
     }
-    const flat = content.every((x) => x.type === "text") ? content.map((x) => (x as { text: string }).text).join("") : content;
+    const flat = content.every((x) => x.type === "text") ? content.map((x) => (x as { text: string }).text).join("\n") : content;
 
     if (calls.length) {
       const toolCalls = calls.map((p) => {
@@ -95,6 +100,14 @@ export function geminiToChat(g: GeminiRequest, model: string, stream: boolean): 
   const tc = gc.thinkingConfig;
   const effort = tc ? (normEffort(tc.thinkingLevel) ?? (typeof tc.thinkingBudget === "number" ? effortFromBudget(tc.thinkingBudget) : undefined)) : undefined;
   if (effort) out.reasoning_effort = effort;
+  // generationConfig knobs the old code dropped: structured output and
+  // presence penalty map onto their chat equivalents.
+  if (gc.responseMimeType === "application/json") {
+    out.response_format = gc.responseSchema
+      ? { type: "json_schema", json_schema: { name: "response", schema: gc.responseSchema } }
+      : { type: "json_object" };
+  }
+  if (typeof gc.presencePenalty === "number") out.presence_penalty = gc.presencePenalty;
   const decls = (g.tools ?? []).flatMap((t) => t.functionDeclarations ?? []).filter((d) => d.name);
   if (decls.length) {
     out.tools = decls.map((d) => ({
@@ -147,7 +160,7 @@ export function chatToGemini(c: ChatCompletion, model: string, thoughts = false)
   const parts: GeminiPart[] = [];
   const thinking = typeof ch?.message?.reasoning_content === "string" ? ch.message.reasoning_content : "";
   if (thoughts && thinking) parts.push({ text: thinking, thought: true });
-  const text = typeof ch?.message?.content === "string" ? ch.message.content : "";
+  const text = contentToText(ch?.message?.content);
   if (text || !ch?.message?.tool_calls?.length) parts.push({ text });
   for (const t of ch?.message?.tool_calls ?? []) {
     parts.push({ functionCall: { id: t.id, name: t.function?.name ?? "", args: parseArgs(t.function?.arguments ?? "") } });
@@ -182,24 +195,35 @@ export function chatStreamToGemini(upstream: ReadableStream<Uint8Array>, model: 
         let inTok = 0;
         let outTok = 0;
         const tools = new ToolCallAccumulator();
-        await forEachOpenAIChunk(upstream, (chunk) => {
-          if (chunk.usage) {
-            if (typeof chunk.usage.prompt_tokens === "number") inTok = chunk.usage.prompt_tokens;
-            if (typeof chunk.usage.completion_tokens === "number") outTok = chunk.usage.completion_tokens;
+        try {
+          await forEachOpenAIChunk(upstream, (chunk) => {
+            if (chunk.usage) {
+              if (typeof chunk.usage.prompt_tokens === "number") inTok = chunk.usage.prompt_tokens;
+              if (typeof chunk.usage.completion_tokens === "number") outTok = chunk.usage.completion_tokens;
+            }
+            const ch = chunk.choices?.[0];
+            if (!ch) return;
+            const thought = (ch.delta as { reasoning_content?: string | null } | undefined)?.reasoning_content;
+            if (thoughts && typeof thought === "string" && thought.length) {
+              emit({ candidates: [candidate([{ text: thought, thought: true }], null)], modelVersion: model });
+            }
+            const piece = ch.delta?.content;
+            if (typeof piece === "string" && piece.length) {
+              emit({ candidates: [candidate([{ text: piece }], null)], modelVersion: model });
+            }
+            if (ch.delta?.tool_calls) tools.add(ch.delta.tool_calls);
+            if (ch.finish_reason) finish = ch.finish_reason;
+          });
+        } catch (err) {
+          // An upstream error mid-stream must fail the stream, not end it
+          // with a fake completed frame.
+          try {
+            controller.error(err instanceof Error ? err : new Error(String(err)));
+          } catch {
+            /* already closed */
           }
-          const ch = chunk.choices?.[0];
-          if (!ch) return;
-          const thought = (ch.delta as { reasoning_content?: string | null } | undefined)?.reasoning_content;
-          if (thoughts && typeof thought === "string" && thought.length) {
-            emit({ candidates: [candidate([{ text: thought, thought: true }], null)], modelVersion: model });
-          }
-          const piece = ch.delta?.content;
-          if (typeof piece === "string" && piece.length) {
-            emit({ candidates: [candidate([{ text: piece }], null)], modelVersion: model });
-          }
-          if (ch.delta?.tool_calls) tools.add(ch.delta.tool_calls);
-          if (ch.finish_reason) finish = ch.finish_reason;
-        });
+          return;
+        }
         try {
           const parts: GeminiPart[] = tools.list().map((t) => ({ functionCall: { id: t.id || undefined, name: t.name, args: parseArgs(t.args) } }));
           if (!parts.length) parts.push({ text: "" });

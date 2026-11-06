@@ -6,7 +6,7 @@ import { PROVIDERS } from "../types";
 import type { OpenAIChatRequest } from "../providers/types";
 import { getAdapter } from "../providers";
 import { requireUser, resolveCaller } from "../auth";
-import { checkTokenLimits, providersWithActiveKeys, availableModelSet, getBalanceMicro, getChargeTotalMicro } from "../db";
+import { checkTokenLimits, providersWithActiveKeys, availableModelSet, listAvailableModels, getBalanceMicro, getChargeTotalMicro } from "../db";
 import { serveChat, AUTO_MODEL } from "../chat";
 import { anthropicToOpenAI, openAIToAnthropic, openAIStreamToAnthropic } from "../anthropic";
 import type { AnthropicRequest } from "../anthropic";
@@ -35,6 +35,17 @@ export async function servableModels(env: Env): Promise<Array<{ id: string; owne
       if (blocked.has(id)) continue;
       out.push({ id, owner: provider });
     }
+  }
+  // Models added from a live fetch (POST /admin/keys/:id/models) live in
+  // model_status with available=1 — the static adapter lists can't know
+  // them, but chat can already serve them (routing is provider-agnostic),
+  // so they belong in /v1/models too. Only for providers with an active key.
+  const seen = new Set(out.map((m) => m.id));
+  for (const row of await listAvailableModels(env)) {
+    if (!avail.has(row.provider)) continue;
+    if (seen.has(row.model) || blocked.has(row.model)) continue;
+    seen.add(row.model);
+    out.push({ id: row.model, owner: row.provider });
   }
   return out;
 }
@@ -98,6 +109,36 @@ app.post("/chat/completions", async (c) => {
   if (!Array.isArray(body.messages)) {
     return c.json(
       { error: { message: "messages must be an array", type: "invalid_request_error" } },
+      400,
+    );
+  }
+  if (body.messages.length === 0) {
+    return c.json(
+      { error: { message: "messages must not be empty", type: "invalid_request_error" } },
+      400,
+    );
+  }
+  // Field validation the old code skipped: a bad max_tokens / temperature /
+  // top_p used to travel all the way to the upstream and come back as a
+  // confusing provider error (or a silent empty stream).
+  const maxTokens = (body as { max_tokens?: unknown }).max_tokens;
+  if (maxTokens !== undefined && (typeof maxTokens !== "number" || !Number.isFinite(maxTokens) || maxTokens <= 0)) {
+    return c.json(
+      { error: { message: "max_tokens must be a positive number", type: "invalid_request_error" } },
+      400,
+    );
+  }
+  const temperature = (body as { temperature?: unknown }).temperature;
+  if (temperature !== undefined && (typeof temperature !== "number" || !Number.isFinite(temperature) || temperature < 0 || temperature > 2)) {
+    return c.json(
+      { error: { message: "temperature must be between 0 and 2", type: "invalid_request_error" } },
+      400,
+    );
+  }
+  const topP = (body as { top_p?: unknown }).top_p;
+  if (topP !== undefined && (typeof topP !== "number" || !Number.isFinite(topP) || topP < 0 || topP > 1)) {
+    return c.json(
+      { error: { message: "top_p must be between 0 and 1", type: "invalid_request_error" } },
       400,
     );
   }
@@ -172,7 +213,11 @@ app.post("/messages", async (c) => {
     const text = await oai.text().catch(() => "");
     let msg = text;
     try { msg = (JSON.parse(text) as { error?: { message?: string } }).error?.message ?? text; } catch { /* keep text */ }
-    const type = oai.status === 402 ? "insufficient_quota" : oai.status === 429 ? "rate_limit_error" : "api_error";
+    const type =
+      oai.status === 402 ? "insufficient_quota"
+      : oai.status === 429 ? "rate_limit_error"
+      : oai.status === 400 || oai.status === 404 ? "invalid_request_error"
+      : "api_error";
     return c.json({ type: "error", error: { type, message: msg || `upstream ${oai.status}` } }, oai.status as 500);
   }
 
@@ -188,8 +233,19 @@ app.post("/messages", async (c) => {
       headers: { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache", ...passHeaders },
     });
   }
-  const j = await oai.json().catch(() => ({}));
-  return new Response(JSON.stringify(openAIToAnthropic(j as Parameters<typeof openAIToAnthropic>[0], a.model)), {
+  // A 200 with an empty or non-JSON body is not a message — 502 it. The old
+  // code translated `{}` into a 200 with empty text (a fake success).
+  const text = await oai.text().catch(() => "");
+  let j: Parameters<typeof openAIToAnthropic>[0];
+  try {
+    j = JSON.parse(text) as Parameters<typeof openAIToAnthropic>[0];
+  } catch {
+    return c.json({ type: "error", error: { type: "api_error", message: "upstream returned a non-JSON 200 response" } }, 502);
+  }
+  if (!j || typeof j !== "object" || !Array.isArray(j.choices)) {
+    return c.json({ type: "error", error: { type: "api_error", message: "upstream returned an empty 200 response" } }, 502);
+  }
+  return new Response(JSON.stringify(openAIToAnthropic(j, a.model)), {
     status: 200,
     headers: { "content-type": "application/json", ...passHeaders },
   });
@@ -222,7 +278,12 @@ app.post("/responses", async (c) => {
   const oai = await serveChat(c.env, c.executionCtx, responsesToChat(r), caller);
   if (oai.status < 200 || oai.status > 299) {
     const message = await upstreamErrorMessage(oai);
-    return c.json({ error: { message, type: oai.status === 402 ? "insufficient_quota" : "api_error" } }, oai.status as 500);
+    const type =
+      oai.status === 402 ? "insufficient_quota"
+      : oai.status === 429 ? "rate_limit_error"
+      : oai.status === 400 || oai.status === 404 ? "invalid_request_error"
+      : "api_error";
+    return c.json({ error: { message, type } }, oai.status as 500);
   }
   const passHeaders = passKeypoolHeaders(oai);
   if (r.stream === true && oai.body) {
@@ -231,8 +292,18 @@ app.post("/responses", async (c) => {
       headers: { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache", ...passHeaders },
     });
   }
-  const j = await oai.json().catch(() => ({}));
-  return new Response(JSON.stringify(chatToResponses(j as Parameters<typeof chatToResponses>[0], r)), {
+  // A 200 with an empty or non-JSON body is not a response — 502 it.
+  const text = await oai.text().catch(() => "");
+  let j: Parameters<typeof chatToResponses>[0];
+  try {
+    j = JSON.parse(text) as Parameters<typeof chatToResponses>[0];
+  } catch {
+    return c.json({ error: { message: "upstream returned a non-JSON 200 response", type: "api_error" } }, 502);
+  }
+  if (!j || typeof j !== "object" || !Array.isArray(j.choices)) {
+    return c.json({ error: { message: "upstream returned an empty 200 response", type: "api_error" } }, 502);
+  }
+  return new Response(JSON.stringify(chatToResponses(j, r)), {
     status: 200,
     headers: { "content-type": "application/json", ...passHeaders },
   });

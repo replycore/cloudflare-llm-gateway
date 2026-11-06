@@ -1,34 +1,14 @@
 /** Cron body: revive expired cooldowns + probe disabled keys back to health. */
 
-import type { Env, Provider } from "./types";
-import { reviveExpiredCooldowns, listDisabledForProbe, reactivateKey } from "./db";
-import { getAdapter } from "./providers/index";
+import type { Env } from "./types";
+import { reviveExpiredCooldowns, listDisabledForProbe, reactivateKey, setKeyBalance, setKeyProjectId } from "./db";
+import { probeKey } from "./probe";
 
 /** Default minutes between cron probes of a single disabled key. */
 const DEFAULT_PROBE_INTERVAL_MINUTES = 60;
 
 /** Max disabled keys to probe in a single cron tick (keep the run cheap). */
 const PROBE_BATCH_LIMIT = 20;
-
-/** A lightweight, auth-requiring GET per provider used as the revive probe. */
-const PROBE_PATH: Record<Provider, string> = {
-  gemini: "/v1beta/models",
-  mistral: "/v1/models",
-  openrouter: "/v1/models",
-  openai: "/v1/models",
-  deepseek: "/v1/models",
-  groq: "/v1/models",
-  moonshot: "/v1/models",
-  glm: "/models",
-  qwen: "/v1/models",
-  deepinfra: "/models",
-  fireworks: "/models",
-  cerebras: "/models",
-  ai21: "/models",
-  cohere: "/models",
-  elevenlabs: "/v1/user",
-  stability: "/v1/user/account",
-};
 
 function probeIntervalMs(env: Env): number {
   const raw = env.PROBE_INTERVAL_MINUTES;
@@ -54,8 +34,11 @@ async function backOffKey(env: Env, keyId: number, now: number): Promise<void> {
 /**
  * Runs on the cron trigger.
  *  1) reviveExpiredCooldowns(env, now)
- *  2) for each disabled key eligible for a probe, send the provider's cheapest
- *     auth-requiring GET with that key; 2xx -> reactivateKey, else back off.
+ *  2) for each disabled key eligible for a probe, run the real probeKey
+ *     (chat/balance check — the old GET /models probe LIED: it returns 200
+ *     for suspended/arrears accounts, so dead keys kept "reviving").
+ *     2xx-alive -> reactivateKey, else back off. Balance and project id from
+ *     the probe are persisted so the admin page shows fresh numbers.
  * Each probe is wrapped in try/catch; this never throws out of scheduled().
  */
 export async function runHealthCheck(
@@ -83,26 +66,19 @@ export async function runHealthCheck(
   for (const key of candidates) {
     probed++;
     try {
-      const adapter = getAdapter(key.provider);
-      const subPath = PROBE_PATH[key.provider];
-      const probeReq = new Request(`https://probe.invalid${subPath}`, { method: "GET" });
-      const res = await adapter.passthrough(subPath, probeReq, key.api_key);
-
-      // Drain the body so the upstream connection can be released.
-      try {
-        await res.body?.cancel();
-      } catch {
-        // ignore body-cancel failures
+      const r = await probeKey(key.provider, key.api_key);
+      if (r.projectId) await setKeyProjectId(env, key.id, r.projectId);
+      if (r.balance && r.balance.remaining != null) {
+        await setKeyBalance(env, key.id, r.balance.remaining, r.balance.unit);
       }
-
-      if (res.status >= 200 && res.status < 300) {
+      if (r.alive && !r.rateLimited) {
         await reactivateKey(env, key.id);
         reactivated++;
       } else {
         await backOffKey(env, key.id, now);
       }
     } catch {
-      // Network error / adapter throw: treat as still-unhealthy and back off.
+      // Network error / probe throw: treat as still-unhealthy and back off.
       await backOffKey(env, key.id, now);
     }
   }

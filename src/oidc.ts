@@ -96,8 +96,10 @@ async function jwtVerify(token: string, secret: string): Promise<Record<string, 
   } catch {
     return null;
   }
-  const exp = typeof payload.exp === "number" ? payload.exp : 0;
-  if (exp && Date.now() / 1000 > exp) return null;
+  const exp = payload.exp;
+  // exp is REQUIRED and must be in the future: a token without exp never
+  // expires, so the old `exp && ...` check let forged no-exp tokens through.
+  if (typeof exp !== "number" || Date.now() / 1000 > exp) return null;
   return payload;
 }
 
@@ -253,7 +255,8 @@ app.get("/callback", async (c) => {
     body,
   });
   if (!tokRes.ok) {
-    return c.text(`token exchange failed: ${tokRes.status} ${await tokRes.text()}`, 502);
+    // Don't echo the IdP's error body: it can carry internal details.
+    return c.text("token exchange failed", 502);
   }
   const tok = (await tokRes.json()) as { access_token?: string };
   if (!tok.access_token) return c.text("no access_token", 502);
@@ -283,7 +286,9 @@ app.get("/callback", async (c) => {
   if (isNew && !isAdmin) {
     const bonusUsd = Number(c.env.SIGNUP_BONUS_USD);
     if (Number.isFinite(bonusUsd) && bonusUsd > 0) {
-      await topUpMicro(c.env, sub, Math.round(bonusUsd * 1_000_000), "新用户活动赠送");
+      // Idempotent: a retried callback (double-click, IdP retry) must not
+      // credit the bonus twice.
+      await topUpMicro(c.env, sub, Math.round(bonusUsd * 1_000_000), "新用户活动赠送", `signup-bonus:${sub}`);
     }
   }
   const session = await jwtSign(

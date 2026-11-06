@@ -16,7 +16,7 @@ const openai: ProviderAdapter = {
   name: "openai",
 
   models(): string[] {
-    return ["gpt-4o", "gpt-4o-mini", "o3-mini"];
+    return ["gpt-4o", "gpt-4o-mini", "gpt-5", "gpt-5-mini", "o3-mini", "o4-mini"];
   },
 
   async chatCompletions(req: OpenAIChatRequest, key: string): Promise<Response> {
@@ -26,7 +26,8 @@ const openai: ProviderAdapter = {
     };
     // Reasoning models (o-series, gpt-5) reject `max_tokens`; they take
     // `max_completion_tokens` (which the gateway folds into max_tokens on entry).
-    if (/^(o[1-9]|gpt-5)/.test(String(body.model)) && typeof body.max_tokens === "number") {
+    // Only set it when the caller didn't already supply one.
+    if (/^(o[1-9]|gpt-5)/.test(String(body.model)) && typeof body.max_tokens === "number" && typeof body.max_completion_tokens !== "number") {
       body.max_completion_tokens = body.max_tokens;
       delete body.max_tokens;
     }
@@ -49,6 +50,7 @@ const openai: ProviderAdapter = {
     headers.delete("content-length");
     headers.delete("cookie");
     headers.delete("x-goog-api-key");
+    headers.delete("x-api-key");
 
     const method = req.method.toUpperCase();
     const hasBody = method !== "GET" && method !== "HEAD";

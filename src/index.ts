@@ -11,6 +11,7 @@
 import { Hono } from "hono";
 import type { Env } from "./types";
 import { runCheckAll, probeModels } from "./probe";
+import { runHealthCheck } from "./cron";
 import { adminPage } from "./ui";
 import auth from "./oidc";
 import admin from "./routes/admin";
@@ -59,8 +60,28 @@ const scheduled = (
   ctx: ExecutionContext
 ): void => {
   // Automatic health-check on the cron tick: revive recovered keys, disable
-  // dead, then refresh per-model availability.
-  ctx.waitUntil(runCheckAll(env).then(() => probeModels(env)));
+  // dead, then refresh per-model availability. Each phase has its own catch
+  // so one failing phase can't kill the others (the old chained .then()
+  // skipped probeModels entirely whenever runCheckAll threw).
+  ctx.waitUntil(
+    (async () => {
+      try {
+        await runHealthCheck(env);
+      } catch {
+        // revive/probe phase failed — continue to the sweep below
+      }
+      try {
+        await runCheckAll(env);
+      } catch {
+        // sweep failed — continue to model probing below
+      }
+      try {
+        await probeModels(env);
+      } catch {
+        // model probing failed — nothing more to do this tick
+      }
+    })()
+  );
 };
 
 // Behind Alibaba Cloud ESA (mainland China) the gateway is reached as ai-origin.leeguoo.com.

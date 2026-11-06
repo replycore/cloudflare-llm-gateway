@@ -43,6 +43,7 @@ const deepseek: ProviderAdapter = {
     headers.delete("content-length");
     headers.delete("cookie");
     headers.delete("x-goog-api-key");
+    headers.delete("x-api-key");
 
     const method = req.method.toUpperCase();
     const hasBody = method !== "GET" && method !== "HEAD";
