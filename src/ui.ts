@@ -1780,10 +1780,10 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
         // Custom keys are named by their service (slug): showing just the
         // provider ("custom") makes every custom key indistinguishable.
         var provName = (k.provider === 'custom' && k.service_slug) ? k.service_slug : k.provider;
-        // Only custom keys are editable (service name + base URL); built-in
-        // providers have nothing to edit here.
-        var editBtn = k.provider === 'custom' ? '<button class="btn ghost small kl-edit">编辑</button> ' : '';
-        return '<tr data-id="'+k.id+'" data-slug="'+esc(k.service_slug||'')+'" data-base="'+esc(k.base_url||'')+'">'
+        // Every key is editable: any key can rotate its api_key; custom keys
+        // can also change their service name and base URL.
+        var editBtn = '<button class="btn ghost small kl-edit">编辑</button> ';
+        return '<tr data-id="'+k.id+'" data-provider="'+esc(k.provider||'')+'" data-slug="'+esc(k.service_slug||'')+'" data-base="'+esc(k.base_url||'')+'">'
           +'<td><span class="dot '+sd+'" title="'+sLabel+'"></span>'+esc(provName)+proj+'</td>'
           +'<td style="font-family:ui-monospace,monospace;font-size:12.5px;white-space:nowrap">'+esc(k.masked)+' <button class="btn ghost small kl-copy" title="复制完整 key">复制</button></td>'
           +'<td class="n">'+k.total_requests+' / '+k.total_fails+cf+'</td>'
@@ -1911,39 +1911,54 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
             }).catch(function(){ statusEl.innerHTML='<span class="e">网络错误</span>'; statusEl.scrollIntoView({ block:'nearest' }); customBtn.disabled=false; });
           };
         };
-        // 「编辑」:仅自定义服务 key 可改服务名和 API 地址。改服务名会连同它的
-        // 模型一起改名（custom:<旧名>:<模型> → custom:<新名>:<模型>）；只改
-        // 地址不影响模型。内置供应商没有可改的字段，不显示编辑按钮。
+        // 「编辑」:改 key 值（所有 key 都能改）以及自定义服务的服务名和 API
+        // 地址。改服务名会连同它的模型一起改名；只改地址不影响模型。换 key
+        // 值会清掉这把 key 的失败状态（失败次数、冷却、上次错误），手动禁用
+        // 的保持禁用。内置供应商没有可改的名字和地址。
         var ed=tr.querySelector('.kl-edit'); if(ed) ed.onclick=function(){
           var next=tr.nextSibling;
           if(next && next.className && next.className.indexOf('kl-edit-row')>=0){ next.parentNode.removeChild(next); return; }
+          var isCustom = tr.getAttribute('data-provider') === 'custom';
           var panel=document.createElement('tr');
           panel.className='kl-edit-row';
+          var fields='';
+          if(isCustom){
+            fields+='<label style="display:flex;gap:6px;align-items:center">服务名 <input class="kl-ed-slug" value="'+esc(tr.getAttribute('data-slug')||'')+'" style="width:140px"></label>'
+              +'<label style="display:flex;gap:6px;align-items:center;flex:1">API 地址 <input class="kl-ed-base" value="'+esc(tr.getAttribute('data-base')||'')+'" style="flex:1;min-width:220px"></label>';
+          }
+          fields+='<label style="display:flex;gap:6px;align-items:center;flex:1">API Key <input type="password" class="kl-ed-key" placeholder="留空则不改" style="flex:1;min-width:220px"></label>';
           panel.innerHTML='<td colspan="7"><div style="padding:8px 0">'
             +'<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px">'
-            +'<label style="display:flex;gap:6px;align-items:center">服务名 <input class="kl-ed-slug" value="'+esc(tr.getAttribute('data-slug')||'')+'" style="width:140px"></label>'
-            +'<label style="display:flex;gap:6px;align-items:center;flex:1">API 地址 <input class="kl-ed-base" value="'+esc(tr.getAttribute('data-base')||'')+'" style="flex:1;min-width:220px"></label>'
+            +fields
             +'<button class="btn primary small kl-ed-save">保存</button><button class="btn ghost small kl-ed-cancel">取消</button></div>'
-            +'<div class="kl-ed-status hint">改服务名会连同它的模型一起改名；只改地址不影响模型。服务名须为小写字母/数字/连字符（1-32 字符）。</div>'
+            +'<div class="kl-ed-status hint">'+(isCustom?'改服务名会连同它的模型一起改名；只改地址不影响模型。服务名须为小写字母/数字/连字符（1-32 字符）。':'内置供应商只能改 key 值；供应商和地址是固定的。')+'API Key 留空则不改；填了就替换，并清掉这把 key 的失败状态。</div>'
             +'</div></td>';
           tr.parentNode.insertBefore(panel, tr.nextSibling);
           var statusEl=panel.querySelector('.kl-ed-status');
           var saveBtn=panel.querySelector('.kl-ed-save');
           panel.querySelector('.kl-ed-cancel').onclick=function(){ panel.parentNode.removeChild(panel); };
           saveBtn.onclick=function(){
-            var slug=(panel.querySelector('.kl-ed-slug').value||'').trim().toLowerCase();
-            var base=(panel.querySelector('.kl-ed-base').value||'').trim();
-            if(!slug){ statusEl.innerHTML='<span class="e">服务名不能为空</span>'; return; }
-            if(!/^https?:\/\//i.test(base)){ statusEl.innerHTML='<span class="e">API 地址须为 http(s) 地址</span>'; return; }
+            var body={};
+            var keyed=false;
+            if(isCustom){
+              var slug=(panel.querySelector('.kl-ed-slug').value||'').trim().toLowerCase();
+              var base=(panel.querySelector('.kl-ed-base').value||'').trim();
+              if(!slug){ statusEl.innerHTML='<span class="e">服务名不能为空</span>'; return; }
+              if(!/^https?:\/\//i.test(base)){ statusEl.innerHTML='<span class="e">API 地址须为 http(s) 地址</span>'; return; }
+              body.service_slug=slug; body.base_url=base; keyed=true;
+            }
+            var apiKey=(panel.querySelector('.kl-ed-key').value||'').trim();
+            if(apiKey){ body.api_key=apiKey; keyed=true; }
+            if(!keyed){ statusEl.innerHTML='<span class="e">没有要改的内容</span>'; return; }
             saveBtn.disabled=true; statusEl.textContent='保存中…';
-            api('/admin/keys/'+id+'/edit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({service_slug:slug, base_url:base})}).then(function(r){
+            api('/admin/keys/'+id+'/edit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}).then(function(r){
               if(!r.ok){
                 statusEl.innerHTML='<span class="e">保存失败 '+esc((r.body&&r.body.error&&r.body.error.message)||('错误 '+r.status))+'</span>';
                 statusEl.scrollIntoView({ block:'nearest' });
                 saveBtn.disabled=false; return;
               }
               var renamed=(r.body.renamed_models||0);
-              statusEl.innerHTML='<span class="k">已保存</span>'+(renamed?(' · '+renamed+' 个模型已随服务名改名'):'')+' · 列表已刷新';
+              statusEl.innerHTML='<span class="k">已保存</span>'+(renamed?(' · '+renamed+' 个模型已随服务名改名'):'')+(apiKey?' · API Key 已更新':'')+' · 列表已刷新';
               statusEl.scrollIntoView({ block:'nearest' });
               setTimeout(function(){
                 if(panel.isConnected && panel.parentNode) panel.parentNode.removeChild(panel);

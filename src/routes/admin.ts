@@ -34,7 +34,7 @@ import {
   normalizeModelKey,
   addCustomKey,
   customServiceBaseUrl,
-  updateCustomKey,
+  updateKey,
   firstCustomModel,
 } from "../db";
 import { cooldownMinutes, MAX_CONSECUTIVE_FAILS } from "../keypool";
@@ -388,11 +388,12 @@ app.post("/keys/custom", async (c) => {
   return c.json({ added: result.added, duplicate: result.duplicate, id: result.id, slug, base_url: baseUrl });
 });
 
-// POST /keys/:id/edit — edit a custom service key's base URL and/or service
-// name (slug). Built-in providers have nothing editable here (their provider
-// is fixed and the api_key is rotated by deleting + re-adding). Renaming a
-// slug also renames the service's models (custom:<old>:<model> →
-// custom:<new>:<model>), so callers don't have to re-add them.
+// POST /keys/:id/edit — edit a key: rotate its api_key (any key) and/or, for
+// a custom service key, its base URL and service name (slug). Built-in
+// providers have no editable name or address (fixed by the adapter), only
+// the key itself. Renaming a slug also renames the service's models
+// (custom:<old>:<model> → custom:<new>:<model>), so callers don't have to
+// re-add them.
 app.post("/keys/:id/edit", async (c) => {
   const id = parseId(c.req.param("id"));
   if (id === null) {
@@ -404,8 +405,14 @@ app.post("/keys/:id/edit", async (c) => {
   } catch {
     return c.json({ error: { message: "invalid json body", type: "invalid_request_error" } }, 400);
   }
-  const b = (body ?? {}) as { base_url?: unknown; service_slug?: unknown };
-  const patch: { baseUrl?: string; slug?: string } = {};
+  const b = (body ?? {}) as { api_key?: unknown; base_url?: unknown; service_slug?: unknown };
+  const patch: { apiKey?: string; baseUrl?: string; slug?: string } = {};
+  if (b.api_key !== undefined) {
+    if (typeof b.api_key !== "string" || !b.api_key.trim()) {
+      return c.json({ error: { message: "api_key 不能为空", type: "invalid_request_error" } }, 400);
+    }
+    patch.apiKey = b.api_key.trim();
+  }
   if (b.base_url !== undefined) {
     if (typeof b.base_url !== "string") {
       return c.json({ error: { message: "base_url 须为字符串", type: "invalid_request_error" } }, 400);
@@ -426,11 +433,11 @@ app.post("/keys/:id/edit", async (c) => {
     }
     patch.slug = slug;
   }
-  if (patch.baseUrl === undefined && patch.slug === undefined) {
+  if (patch.apiKey === undefined && patch.baseUrl === undefined && patch.slug === undefined) {
     return c.json({ error: { message: "nothing to update", type: "invalid_request_error" } }, 400);
   }
   try {
-    const { row, renamedModels } = await updateCustomKey(c.env, id, patch);
+    const { row, renamedModels } = await updateKey(c.env, id, patch);
     return c.json({
       id: row.id,
       provider: row.provider,
