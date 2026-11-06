@@ -1971,30 +1971,39 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
         var cp=tr.querySelector('.kl-copy'); if(cp) cp.onclick=function(){ cp.disabled=true; var o=cp.textContent; api('/admin/keys/'+id+'/reveal').then(function(r){ cp.disabled=false; if(r.ok && r.body && r.body.api_key){ copy(r.body.api_key, cp); } else { cp.textContent='失败'; setTimeout(function(){cp.textContent=o;},900); } }).catch(function(){ cp.disabled=false; cp.textContent='失败'; setTimeout(function(){cp.textContent=o;},900); }); };
         var en=tr.querySelector('.kl-enable'); if(en) en.onclick=function(){ api('/admin/keys/'+id+'/enable',{method:'POST'}).then(loadKeyList); };
         var dis=tr.querySelector('.kl-disable'); if(dis) dis.onclick=function(){ api('/admin/keys/'+id+'/disable',{method:'POST'}).then(loadKeyList); };
-        // Delete is a two-step inline confirmation (first click arms the
-        // button to "确认删除？", second click deletes). A native confirm()
-        // dialog is unreliable here: automated browsers swallow it (it
-        // returns false with no visible dialog) and it is flaky on mobile,
-        // so six clicks did nothing in verification.
+        // Delete opens an inline confirmation panel with a dedicated
+        // confirm button. A native confirm() dialog is swallowed by
+        // automated browsers, and a two-step button (arm on first click,
+        // delete on second) proved unreliable too: the second click did not
+        // reach the armed state, and no failure was ever reported. A panel
+        // keeps the confirm action on its own stable button, like the
+        // add-model and edit panels (whose buttons verify fine).
         var del=tr.querySelector('.kl-del'); if(del) del.onclick=function(){
-          if(del.getAttribute('data-armed')){
-            del.disabled=true; del.textContent='删除中…';
+          var next=tr.nextSibling;
+          if(next && next.className && next.className.indexOf('kl-del-row')>=0){ next.parentNode.removeChild(next); return; }
+          var panel=document.createElement('tr');
+          panel.className='kl-del-row';
+          panel.innerHTML='<td colspan="7"><div style="padding:8px 0">'
+            +'<div style="margin-bottom:6px">确认删除这个 key？删除后不可恢复。</div>'
+            +'<div style="display:flex;gap:8px;align-items:center"><button class="btn primary small kl-del-confirm">确认删除</button><button class="btn ghost small kl-del-cancel">取消</button><span class="kl-del-status hint"></span></div>'
+            +'</div></td>';
+          tr.parentNode.insertBefore(panel, tr.nextSibling);
+          var statusEl=panel.querySelector('.kl-del-status');
+          var confirmBtn=panel.querySelector('.kl-del-confirm');
+          panel.querySelector('.kl-del-cancel').onclick=function(){ panel.parentNode.removeChild(panel); };
+          confirmBtn.onclick=function(){
+            confirmBtn.disabled=true; statusEl.textContent='删除中…';
             api('/admin/keys/'+id,{method:'DELETE'}).then(function(r){
               if(!r.ok){
-                del.disabled=false; del.textContent='删'; del.removeAttribute('data-armed');
-                var res=tr.querySelector('.kl-result'); if(res) res.innerHTML='<span style="color:var(--red)">删除失败 '+r.status+'</span>';
-                return;
+                statusEl.innerHTML='<span class="e">删除失败 '+r.status+'</span>';
+                confirmBtn.disabled=false; return;
               }
               loadKeyList();
             }).catch(function(){
-              del.disabled=false; del.textContent='删'; del.removeAttribute('data-armed');
-              var res2=tr.querySelector('.kl-result'); if(res2) res2.innerHTML='<span style="color:var(--red)">删除出错（网络）</span>';
+              statusEl.innerHTML='<span class="e">删除出错（网络）</span>';
+              confirmBtn.disabled=false;
             });
-            return;
-          }
-          del.setAttribute('data-armed','1');
-          del.textContent='确认删除？';
-          setTimeout(function(){ if(del.isConnected){ del.removeAttribute('data-armed'); del.textContent='删'; } }, 3000);
+          };
         };
       });
     }).catch(function(){
