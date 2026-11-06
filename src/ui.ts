@@ -1971,7 +1971,24 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
         var cp=tr.querySelector('.kl-copy'); if(cp) cp.onclick=function(){ cp.disabled=true; var o=cp.textContent; api('/admin/keys/'+id+'/reveal').then(function(r){ cp.disabled=false; if(r.ok && r.body && r.body.api_key){ copy(r.body.api_key, cp); } else { cp.textContent='失败'; setTimeout(function(){cp.textContent=o;},900); } }).catch(function(){ cp.disabled=false; cp.textContent='失败'; setTimeout(function(){cp.textContent=o;},900); }); };
         var en=tr.querySelector('.kl-enable'); if(en) en.onclick=function(){ api('/admin/keys/'+id+'/enable',{method:'POST'}).then(loadKeyList); };
         var dis=tr.querySelector('.kl-disable'); if(dis) dis.onclick=function(){ api('/admin/keys/'+id+'/disable',{method:'POST'}).then(loadKeyList); };
-        var del=tr.querySelector('.kl-del'); if(del) del.onclick=function(){ if(confirm('删除这个 key?不可恢复')) api('/admin/keys/'+id,{method:'DELETE'}).then(loadKeyList); };
+        // Delete is a two-step inline confirmation (first click arms the
+        // button to "确认删除？", second click deletes). A native confirm()
+        // dialog is unreliable here: automated browsers swallow it (it
+        // returns false with no visible dialog) and it is flaky on mobile,
+        // so six clicks did nothing in verification.
+        var del=tr.querySelector('.kl-del'); if(del) del.onclick=function(){
+          if(del.getAttribute('data-armed')){
+            del.disabled=true; del.textContent='删除中…';
+            api('/admin/keys/'+id,{method:'DELETE'}).then(function(r){
+              if(!r.ok){ del.disabled=false; del.textContent='删'; del.removeAttribute('data-armed'); return; }
+              loadKeyList();
+            }).catch(function(){ del.disabled=false; del.textContent='删'; del.removeAttribute('data-armed'); });
+            return;
+          }
+          del.setAttribute('data-armed','1');
+          del.textContent='确认删除？';
+          setTimeout(function(){ if(del.isConnected){ del.removeAttribute('data-armed'); del.textContent='删'; } }, 3000);
+        };
       });
     }).catch(function(){
       tb.innerHTML='<tr><td colspan="7" style="color:var(--red)">加载失败 · <button class="btn ghost small" id="keylist-retry">重试</button></td></tr>';
