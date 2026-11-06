@@ -249,6 +249,42 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
     .center, .card.r1, .card.r2 { padding: 20px 16px !important; }
     #modalAddKey { position: fixed !important; left: 50% !important; top: 50% !important; transform: translate(-50%,-50%) !important;
       width: calc(100vw - 24px) !important; max-width: 560px !important; max-height: 86vh !important; overflow-y: auto !important; border-radius: 20px !important; }
+    /* ---- narrow-screen fixes (mobile audit 2026-11-07) ---- */
+    /* Card headers: let the title row wrap instead of squeezing the summary into a vertical column of single characters. */
+    .card h2 { flex-wrap: wrap; }
+    #keylist-summary { flex: 1 1 100%; margin: 0 !important; }
+    /* Forms: stack fields full-width so selects/inputs are never truncated. */
+    .row { flex-direction: column; align-items: stretch; }
+    .row > div { width: 100%; }
+    /* Bottom bar: one row (logo dot + scrollable nav + compact me-box). The active tab is scrolled into view by selectSection. */
+    .side { flex-wrap: nowrap !important; }
+    .side .brand h1 { display: none; }
+    .side .brand .logo-dot { width: 22px; height: 22px; }
+    .nav { grid-auto-columns: minmax(56px, 1fr); }
+    .nav a { font-size: 10px; padding: 6px 2px 4px !important; min-height: 48px; }
+    /* Key 列表：表格变卡片，操作按钮换行，不再横向溢出。 */
+    #sec-keylist .card table { overflow-x: visible; }
+    #sec-keylist thead { display: none; }
+    #sec-keylist tbody, #sec-keylist tbody tr { display: block; }
+    #sec-keylist tr[data-id] { border: 1px solid var(--glass-border); border-radius: 14px; padding: 12px 14px; margin-bottom: 12px; background: var(--glass); }
+    #sec-keylist tr[data-id] td { display: block; white-space: normal !important; padding: 3px 0 !important; border: none !important; }
+    #sec-keylist tr[data-id] td::before { color: var(--faint); font-size: 12px; margin-right: 6px; }
+    #sec-keylist tr[data-id] td:nth-child(1)::before { content: "供应商："; }
+    #sec-keylist tr[data-id] td:nth-child(2)::before { content: "Key："; }
+    #sec-keylist tr[data-id] td:nth-child(3)::before { content: "请求/失败："; }
+    #sec-keylist tr[data-id] td:nth-child(4)::before { content: "上次错误："; }
+    #sec-keylist tr[data-id] td:nth-child(5)::before { content: "测活/余额："; }
+    #sec-keylist tr[data-id] td:nth-child(6)::before { content: "添加时间："; }
+    #sec-keylist tr[data-id] td:nth-child(7) { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 10px !important; }
+    #sec-keylist tr[data-id] td:nth-child(7)::before { content: none; }
+    #sec-keylist tr.kl-addmodel-row, #sec-keylist tr.kl-edit-row, #sec-keylist tr.kl-del-row { display: block; margin-bottom: 12px; }
+    #sec-keylist tr.kl-addmodel-row td, #sec-keylist tr.kl-edit-row td, #sec-keylist tr.kl-del-row td { display: block; white-space: normal !important; padding: 0 !important; border: none !important; }
+    /* 新增模型面板：顶部筛选行换行（输入框占满一行，按钮到下一行），模型名断行。 */
+    .kl-am-top { flex-wrap: wrap; }
+    .kl-am-top .kl-am-q { flex: 1 1 100% !important; }
+    .kl-am-list label { word-break: break-all; }
+    /* 模型可用性报错：长 JSON 断行显示，不再单行截断。 */
+    #modelstatus-body > div { word-break: break-all; }
   }
   @media (min-width: 821px) {
     .layout { flex-direction: row; }
@@ -1119,6 +1155,9 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
     Array.prototype.forEach.call($('nav').querySelectorAll('.navitem'), function(a){
       a.classList.toggle('active', a.getAttribute('data-sec')===id);
     });
+    // 窄屏下底栏横向滚动：把当前标签滚到可见位置（否则它可能被截在滚动区外）。
+    try{ var navEl=$('nav'); var actEl=navEl && navEl.querySelector('.navitem.active');
+      if(navEl && actEl) navEl.scrollLeft = actEl.offsetLeft - navEl.clientWidth/2 + actEl.offsetWidth/2; }catch(e){}
     if(location.hash!=='#'+id) { try{ history.replaceState(null,'','#'+id); }catch(e){} }
     try{ window.scrollTo(0,0); }catch(e){} // 切页后回到顶部：移动端底栏点标签，看到的应是新页面的顶部
     onSectionEnter(id);
@@ -1129,6 +1168,9 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
   });
   function onSectionEnter(id){
     if(id==='models' || id==='docs'){
+      // 先用兜底模型立刻填文档示例框（不等 /v1/models 回来，避免框里长时间空白），
+      // 模型列表回来后再按真实首个模型重填一次。
+      if(id==='docs') fillDocs();
       loadModels().then(function(){ renderModelsInto('models-body'); renderModelsInto('docs-models-body'); fillDocs(); var mu=$('models-updated'); if(mu) mu.textContent=modelsFetchedAt?'更新于 '+fmtDate(modelsFetchedAt):''; });
       var mrf=$('models-refresh'); if(mrf) mrf.onclick=function(){ mrf.disabled=true; loadModels().then(function(){ renderModelsInto('models-body'); var mu=$('models-updated'); if(mu) mu.textContent=modelsFetchedAt?'更新于 '+fmtDate(modelsFetchedAt):''; mrf.disabled=false; }); };
     }
@@ -1855,7 +1897,7 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
           var panel=document.createElement('tr');
           panel.className='kl-addmodel-row';
           panel.innerHTML='<td colspan="7"><div style="padding:8px 0">'
-            +'<div style="display:flex;gap:8px;align-items:center;margin-bottom:6px"><input class="kl-am-q" placeholder="筛选模型…" style="flex:1"><button class="btn primary small kl-am-add" disabled>添加选中</button><button class="btn ghost small kl-am-cancel">取消</button></div>'
+            +'<div class="kl-am-top" style="display:flex;gap:8px;align-items:center;margin-bottom:6px"><input class="kl-am-q" placeholder="筛选模型…" style="flex:1"><button class="btn primary small kl-am-add" disabled>添加选中</button><button class="btn ghost small kl-am-cancel">取消</button></div>'
             +'<div class="kl-am-status hint">正在用该 key 向上游拉取模型列表…</div>'
             +'<div class="kl-am-list" style="max-height:220px;overflow:auto;margin-top:6px"></div>'
             +'<div style="margin-top:10px;border-top:1px solid var(--line);padding-top:8px"><div class="hint" style="margin-bottom:4px">自定义模型：不在上游列表里的模型 ID 也可以直接加（每行一个；下次探活会自动验证，调不通的会被屏蔽）</div>'
@@ -2315,7 +2357,7 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
         + bad.map(function(m){
           return '<div style="margin:3px 0"><span class="dot d-disabled"></span><b class="mono-token">'+esc(m.model)+'</b>'
             +' <span style="color:var(--faint);font-size:12px">'+esc(m.provider||'')+'</span>'
-            +(m.reason?' · <span style="color:var(--red);font-size:12px">'+esc(String(m.reason).slice(0,80))+'</span>':'')+'</div>';
+            +(m.reason?' · <span style="color:var(--red);font-size:12px">'+esc(String(m.reason).slice(0,200))+'</span>':'')+'</div>';
         }).join('');
     }).catch(function(){ el.innerHTML='<span class="e">出错</span>'; });
   }
