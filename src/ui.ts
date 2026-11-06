@@ -893,6 +893,7 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
   <input id="modelSearch" type="text" placeholder="输入模型名过滤（模糊匹配）"/>
   <div id="modelList" style="margin-top:10px; max-height:200px; overflow:auto;"></div>
   <div id="modelCount" class="hint" style="margin-top:6px"></div>
+  <div id="addStatus" class="hint" style="margin-top:6px;display:none"></div>
   <div style="margin-top:10px; display:flex; gap:10px;">
     <button class="btn primary" id="addConfirm">确认导入</button>
     <button class="btn ghost" id="addCancel">取消</button>
@@ -1836,6 +1837,11 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
             addBtn.disabled=!n;
             addBtn.textContent=n?('添加选中 ('+n+')'):'添加选中';
           }
+          function amCloseAfter(){
+            // 反馈在面板顶部、按钮在底部，矮视口下看不到：先滚到反馈处，读完再自动收起面板。
+            statusEl.scrollIntoView({ block:'nearest' });
+            setTimeout(function(){ if (panel.isConnected && panel.parentNode) panel.parentNode.removeChild(panel); }, 1500);
+          }
           function renderAmList(){
             var needle=(qEl.value||'').trim().toLowerCase();
             var shown=needle?fetched.filter(function(m){return m.id.toLowerCase().indexOf(needle)>=0;}):fetched;
@@ -1865,12 +1871,14 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
             api('/admin/keys/'+id+'/models',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({models:sel})}).then(function(r){
               if(!r.ok){
                 statusEl.innerHTML='<span class="e">添加失败 '+esc((r.body&&r.body.error&&r.body.error.message)||('错误 '+r.status))+'</span>';
+                statusEl.scrollIntoView({ block:'nearest' });
                 addBtn.disabled=false; return;
               }
               statusEl.innerHTML='<span class="k">已添加 '+(r.body.added||0)+' 个新模型（共提交 '+(r.body.total||0)+' 个）</span> · 模型列表已刷新';
+              amCloseAfter();
               loadModels().then(function(){ renderModelsInto('models-body'); renderModelsInto('docs-models-body'); });
               addBtn.disabled=false;
-            }).catch(function(){ statusEl.innerHTML='<span class="e">网络错误</span>'; addBtn.disabled=false; });
+            }).catch(function(){ statusEl.innerHTML='<span class="e">网络错误</span>'; statusEl.scrollIntoView({ block:'nearest' }); addBtn.disabled=false; });
           };
           // 自定义模型：直接输入模型 ID（每行一个），不依赖上游列表是否拉取成功。
           var customBtn=panel.querySelector('.kl-am-addcustom');
@@ -1885,14 +1893,16 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
             api('/admin/keys/'+id+'/models',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({models:list})}).then(function(r){
               if(!r.ok){
                 statusEl.innerHTML='<span class="e">添加失败 '+esc((r.body&&r.body.error&&r.body.error.message)||('错误 '+r.status))+'</span>';
+                statusEl.scrollIntoView({ block:'nearest' });
                 customBtn.disabled=false; return;
               }
               var note=bad.length?(' · 已跳过含空格的输入：'+esc(bad.join('、'))):'';
               statusEl.innerHTML='<span class="k">已添加 '+(r.body.added||0)+' 个新模型（共提交 '+(r.body.total||0)+' 个）</span> · 模型列表已刷新'+note;
+              amCloseAfter();
               ta.value='';
               loadModels().then(function(){ renderModelsInto('models-body'); renderModelsInto('docs-models-body'); });
               customBtn.disabled=false;
-            }).catch(function(){ statusEl.innerHTML='<span class="e">网络错误</span>'; customBtn.disabled=false; });
+            }).catch(function(){ statusEl.innerHTML='<span class="e">网络错误</span>'; statusEl.scrollIntoView({ block:'nearest' }); customBtn.disabled=false; });
           };
         };
         var cp=tr.querySelector('.kl-copy'); if(cp) cp.onclick=function(){ cp.disabled=true; var o=cp.textContent; api('/admin/keys/'+id+'/reveal').then(function(r){ cp.disabled=false; if(r.ok && r.body && r.body.api_key){ copy(r.body.api_key, cp); } else { cp.textContent='失败'; setTimeout(function(){cp.textContent=o;},900); } }).catch(function(){ cp.disabled=false; cp.textContent='失败'; setTimeout(function(){cp.textContent=o;},900); }); };
@@ -2512,10 +2522,22 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
       var k = addKey.value.trim();
       if (!k) { addKey.focus(); return; }
       var checked = Array.from(modelList.querySelectorAll('input[type=checkbox]:checked')).map(function(cb){ return cb.value; });
+      // 立刻在弹窗内给反馈：请求可能要几秒（批量导入几百个模型），而结果行
+      // 在弹窗背后的页面上——没有这行，点完看起来像没反应。
+      addConfirm.disabled = true; addConfirm.textContent = '导入中…';
+      var st = $('addStatus'); if (st) { st.style.display = 'block'; st.textContent = '导入中…'; }
       var r = await api('/admin/keys/add', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ provider:p, api_key:k, models:checked }) });
       var o = $('importOut'); o.style.display='block';
-      if (!r.ok) { o.innerHTML = '<span class="e">'+esc((r.body && r.body.error && r.body.error.message)||('错误 '+r.status))+'</span>'; return; }
+      if (!r.ok) {
+        var msg = '<span class="e">'+esc((r.body && r.body.error && r.body.error.message)||('错误 '+r.status))+'</span>';
+        if (st) st.innerHTML = msg; // 失败也要写在弹窗里——importOut 在弹窗背后，看不见
+        o.innerHTML = msg;
+        addConfirm.disabled = false; addConfirm.textContent = '确认导入';
+        return;
+      }
       modalAddKey.style.display='none';
+      addConfirm.disabled = false; addConfirm.textContent = '确认导入';
+      if (st) st.style.display = 'none';
       addKey.value = '';
       o.innerHTML = '<span class="k">新增 '+(r.body.added||0)+'</span> 重复 '+(r.body.duplicate||0)+' · 已启用 '+(r.body.selected||[]).length+' 个模型 · 已屏蔽 '+(r.body.blocked||[]).length+' 个';
       loadStats('keys'); loadStats('ov');
@@ -2569,26 +2591,33 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
         csStatus.textContent = '正在用该 key 向上游拉取模型列表…';
         api('/admin/keys/'+csKeyId+'/live-models', { method:'POST' }).then(function(r2){
           if (!r2.ok || !r2.body || !Array.isArray(r2.body.models)) {
+            // 绿框状态行也要同步：之前拉取失败后它一直停在「正在拉取模型列表…」。
+            csShowOut('<span class="k">服务 '+esc(slug)+' 已添加'+dup+'</span> · 拉取失败，可用下方手动输入添加模型');
             csStatus.innerHTML = '<span class="e">拉取失败 '+esc((r2.body && r2.body.error && r2.body.error.message)||('错误 '+r2.status))+'</span> · 可用下方手动输入添加模型';
             return;
           }
           var known = {}; (r2.body.known || []).forEach(function(m){ known[m] = 1; });
           csFetched = r2.body.models.map(function(m){ return { id:m, isNew:!known[m] }; });
           var nNew = csFetched.filter(function(m){ return m.isNew; }).length;
+          csShowOut('<span class="k">服务 '+esc(slug)+' 已添加'+dup+'</span> · 已拉取 '+csFetched.length+' 个模型');
           csStatus.textContent = '共 '+csFetched.length+' 个模型 · 新模型 '+nNew+' 个已默认勾选（已有模型不勾选）';
           csRenderList();
-        }).catch(function(){ csStatus.innerHTML = '<span class="e">网络错误</span> · 可用下方手动输入添加模型'; });
+        }).catch(function(){ csShowOut('<span class="k">服务 '+esc(slug)+' 已添加'+dup+'</span> · 拉取失败，可用下方手动输入添加模型'); csStatus.innerHTML = '<span class="e">网络错误</span> · 可用下方手动输入添加模型'; });
         loadStats('keys'); loadStats('ov');
       }).catch(function(){ csShowOut('<span class="e">网络错误</span>'); });
     };
     function csAddModels(list, done){
       if (!csKeyId) { csShowOut('<span class="e">先添加服务</span>'); return; }
       api('/admin/keys/'+csKeyId+'/models', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ models:list }) }).then(function(r){
-        if (!r.ok) { csStatus.innerHTML = '<span class="e">添加失败 '+esc((r.body && r.body.error && r.body.error.message)||('错误 '+r.status))+'</span>'; return; }
-        csStatus.innerHTML = '<span class="k">已添加 '+(r.body.added||0)+' 个新模型（共提交 '+(r.body.total||0)+' 个）</span> · 模型列表已刷新';
+        if (!r.ok) { csStatus.innerHTML = '<span class="e">添加失败 '+esc((r.body && r.body.error && r.body.error.message)||('错误 '+r.status))+'</span>'; csStatus.scrollIntoView({ block:'nearest' }); return; }
+        // 成功提示原来只写在面板中部，点底部的「添加手动模型」时它在视口上方
+        // 约一屏处，看不到。改写到导入卡片的输出行，并收起面板。
+        var o = $('importOut');
+        if (o) { o.style.display = 'block'; o.innerHTML = '<span class="k">自定义服务 '+esc((csSlug.value || '').trim().toLowerCase())+'：已添加 '+(r.body.added||0)+' 个新模型（共提交 '+(r.body.total||0)+' 个）</span> · 模型列表已刷新'; }
+        csPanel.style.display = 'none';
         loadModels().then(function(){ renderModelsInto('models-body'); renderModelsInto('docs-models-body'); });
         if (done) done();
-      }).catch(function(){ csStatus.innerHTML = '<span class="e">网络错误</span>'; });
+      }).catch(function(){ csStatus.innerHTML = '<span class="e">网络错误</span>'; csStatus.scrollIntoView({ block:'nearest' }); });
     }
     csAddSel.onclick = function(){
       var sel = Array.prototype.map.call(csList.querySelectorAll('input[type=checkbox]:checked'), function(cb){ return cb.value; });
@@ -2604,7 +2633,7 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
       if (!list.length) { csStatus.innerHTML = '<span class="e">先输入模型 ID（每行一个，ID 里不能有空格）</span>'; return; }
       csStatus.textContent = '添加中…';
       csAddModels(list, function(){
-        if (bad.length) csStatus.innerHTML += ' · 已跳过含空格的输入：' + esc(bad.join('、'));
+        if (bad.length) { var o = $('importOut'); if (o) o.innerHTML += ' · 已跳过含空格的输入：' + esc(bad.join('、')); }
         csCustom.value = '';
       });
     };

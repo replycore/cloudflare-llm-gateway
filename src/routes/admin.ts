@@ -30,7 +30,7 @@ import {
   billingDiscount,
   listModelStatus,
   listAvailableModels,
-  setModelStatus,
+  setModelStatusBatch,
   normalizeModelKey,
   addCustomKey,
   customServiceBaseUrl,
@@ -343,8 +343,13 @@ app.post("/keys/:id/models", async (c) => {
   let added = 0;
   for (const m of stored) {
     if (!already.has(m)) added++;
-    await setModelStatus(c.env, m, key.provider, true, null);
   }
+  // Bulk add (e.g. 401 checked models) must not do one D1 round-trip per
+  // model — the same 5-10s stall as POST /keys/add. Same upsert, batched.
+  await setModelStatusBatch(
+    c.env,
+    stored.map((m) => ({ model: m, provider: key.provider, available: true, reason: null }))
+  );
   return c.json({ provider: key.provider, added, total: stored.length, models: stored });
 });
 
@@ -415,11 +420,16 @@ app.post("/keys/add", async (c) => {
   // models for every other key of the provider too. Only the SELECTED models
   // are recorded now (available=1, same as POST /keys/:id/models); the rest
   // are left untouched. `blocked` stays [] to keep the response shape.
-  for (const m of selected) {
-    const id = m.trim();
-    if (!id || /\s/.test(id) || id.length > 200) continue;
-    await setModelStatus(c.env, id, provider, true, null);
-  }
+  const toAdd = selected
+    .map((m) => m.trim())
+    .filter((id) => id && !/\s/.test(id) && id.length <= 200);
+  // Bulk import must not do one D1 round-trip per model: 453 models took
+  // 5-10s sequentially, during which the import modal sat open with no
+  // feedback. Same upsert, batched (see setModelStatusBatch).
+  await setModelStatusBatch(
+    c.env,
+    toAdd.map((id) => ({ model: id, provider, available: true, reason: null }))
+  );
   const blocked: string[] = [];
   return c.json({ added: result.added, duplicate: result.duplicate, provider, selected, blocked });
 });

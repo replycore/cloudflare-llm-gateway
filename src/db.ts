@@ -1333,6 +1333,35 @@ export async function setModelStatus(
     .run();
 }
 
+/**
+ * Batch variant of setModelStatus for bulk imports: one sequential
+ * setModelStatus per model turned a 453-model import (POST /keys/add) into
+ * 453 D1 round-trips (~5-10s — the import modal sat open with no feedback
+ * while the request was still running). Same upsert, chunked into D1
+ * batches of 50, lands in ~10 round-trips. A no-op for an empty list.
+ */
+export async function setModelStatusBatch(
+  env: Env,
+  entries: { model: string; provider: string; available: boolean; reason: string | null }[]
+): Promise<void> {
+  const CHUNK = 50;
+  const now = Date.now();
+  for (let i = 0; i < entries.length; i += CHUNK) {
+    const stmts = entries.slice(i, i + CHUNK).map((e) =>
+      env.DB.prepare(
+        `INSERT INTO keypool_gateway_model_status (model, provider, available, last_checked, reason)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(model) DO UPDATE SET
+           provider = excluded.provider,
+           available = excluded.available,
+           last_checked = excluded.last_checked,
+           reason = excluded.reason`
+      ).bind(e.model, e.provider, e.available ? 1 : 0, now, e.reason)
+    );
+    await env.DB.batch(stmts);
+  }
+}
+
 /** Every model-status row (admin view). */
 export async function listModelStatus(
   env: Env
