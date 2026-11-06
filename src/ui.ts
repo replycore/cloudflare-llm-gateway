@@ -2414,6 +2414,7 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
       }, 600);
     };
     addCancel.onclick = function(){ modalAddKey.style.display='none'; };
+    document.addEventListener('keydown', function(e){ if(e.key === 'Escape' && modalAddKey.style.display !== 'none') modalAddKey.style.display = 'none'; });
     importSelectBtn.onclick = function(){ modalAddKey.style.display='block'; loadProviders(); };
     addConfirm.onclick = async function(){
       var p = addProvider.value;
