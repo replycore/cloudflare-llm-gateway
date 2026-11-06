@@ -1780,14 +1780,17 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
         // Custom keys are named by their service (slug): showing just the
         // provider ("custom") makes every custom key indistinguishable.
         var provName = (k.provider === 'custom' && k.service_slug) ? k.service_slug : k.provider;
-        return '<tr data-id="'+k.id+'">'
+        // Only custom keys are editable (service name + base URL); built-in
+        // providers have nothing to edit here.
+        var editBtn = k.provider === 'custom' ? '<button class="btn ghost small kl-edit">编辑</button> ' : '';
+        return '<tr data-id="'+k.id+'" data-slug="'+esc(k.service_slug||'')+'" data-base="'+esc(k.base_url||'')+'">'
           +'<td><span class="dot '+sd+'" title="'+sLabel+'"></span>'+esc(provName)+proj+'</td>'
           +'<td style="font-family:ui-monospace,monospace;font-size:12.5px;white-space:nowrap">'+esc(k.masked)+' <button class="btn ghost small kl-copy" title="复制完整 key">复制</button></td>'
           +'<td class="n">'+k.total_requests+' / '+k.total_fails+cf+'</td>'
           +'<td class="kl-err" style="max-width:180px;color:var(--faint);font-size:12px;overflow:hidden;text-overflow:ellipsis"'+((cool||reason)?' title="'+esc(cool||String(reason))+'"':'')+'>'+(cool?'<span style="color:var(--amber)">'+esc(cool)+'</span>':err)+'</td>'
           +'<td class="kl-result" style="font-size:12.5px;white-space:nowrap">'+(balStr?'<span style="color:var(--faint)" title="上次探测余额">'+esc(balStr)+'</span>':'')+'</td>'
           +'<td style="color:var(--faint);font-size:12px;white-space:nowrap" title="'+esc((k.created_at?'添加于 '+new Date(k.created_at).toLocaleString()+' · ':'')+luTitle)+'">'+(k.created_at?fmtDate(k.created_at):'–')+'</td>'
-          +'<td style="white-space:nowrap"><button class="btn ghost small kl-check">测活</button> <button class="btn ghost small kl-addmodel">新增模型</button> '+toggle+' <button class="btn ghost small kl-del">删</button></td>'
+          +'<td style="white-space:nowrap"><button class="btn ghost small kl-check">测活</button> <button class="btn ghost small kl-addmodel">新增模型</button> '+editBtn+toggle+' <button class="btn ghost small kl-del">删</button></td>'
           +'</tr>';
       }).join('');
       Array.prototype.forEach.call(tb.querySelectorAll('tr[data-id]'), function(tr){
@@ -1906,6 +1909,48 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
               loadModels().then(function(){ renderModelsInto('models-body'); renderModelsInto('docs-models-body'); });
               customBtn.disabled=false;
             }).catch(function(){ statusEl.innerHTML='<span class="e">网络错误</span>'; statusEl.scrollIntoView({ block:'nearest' }); customBtn.disabled=false; });
+          };
+        };
+        // 「编辑」:仅自定义服务 key 可改服务名和 API 地址。改服务名会连同它的
+        // 模型一起改名（custom:<旧名>:<模型> → custom:<新名>:<模型>）；只改
+        // 地址不影响模型。内置供应商没有可改的字段，不显示编辑按钮。
+        var ed=tr.querySelector('.kl-edit'); if(ed) ed.onclick=function(){
+          var next=tr.nextSibling;
+          if(next && next.className && next.className.indexOf('kl-edit-row')>=0){ next.parentNode.removeChild(next); return; }
+          var panel=document.createElement('tr');
+          panel.className='kl-edit-row';
+          panel.innerHTML='<td colspan="7"><div style="padding:8px 0">'
+            +'<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px">'
+            +'<label style="display:flex;gap:6px;align-items:center">服务名 <input class="kl-ed-slug" value="'+esc(tr.getAttribute('data-slug')||'')+'" style="width:140px"></label>'
+            +'<label style="display:flex;gap:6px;align-items:center;flex:1">API 地址 <input class="kl-ed-base" value="'+esc(tr.getAttribute('data-base')||'')+'" style="flex:1;min-width:220px"></label>'
+            +'<button class="btn primary small kl-ed-save">保存</button><button class="btn ghost small kl-ed-cancel">取消</button></div>'
+            +'<div class="kl-ed-status hint">改服务名会连同它的模型一起改名；只改地址不影响模型。服务名须为小写字母/数字/连字符（1-32 字符）。</div>'
+            +'</div></td>';
+          tr.parentNode.insertBefore(panel, tr.nextSibling);
+          var statusEl=panel.querySelector('.kl-ed-status');
+          var saveBtn=panel.querySelector('.kl-ed-save');
+          panel.querySelector('.kl-ed-cancel').onclick=function(){ panel.parentNode.removeChild(panel); };
+          saveBtn.onclick=function(){
+            var slug=(panel.querySelector('.kl-ed-slug').value||'').trim().toLowerCase();
+            var base=(panel.querySelector('.kl-ed-base').value||'').trim();
+            if(!slug){ statusEl.innerHTML='<span class="e">服务名不能为空</span>'; return; }
+            if(!/^https?:\/\//i.test(base)){ statusEl.innerHTML='<span class="e">API 地址须为 http(s) 地址</span>'; return; }
+            saveBtn.disabled=true; statusEl.textContent='保存中…';
+            api('/admin/keys/'+id+'/edit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({service_slug:slug, base_url:base})}).then(function(r){
+              if(!r.ok){
+                statusEl.innerHTML='<span class="e">保存失败 '+esc((r.body&&r.body.error&&r.body.error.message)||('错误 '+r.status))+'</span>';
+                statusEl.scrollIntoView({ block:'nearest' });
+                saveBtn.disabled=false; return;
+              }
+              var renamed=(r.body.renamed_models||0);
+              statusEl.innerHTML='<span class="k">已保存</span>'+(renamed?(' · '+renamed+' 个模型已随服务名改名'):'')+' · 列表已刷新';
+              statusEl.scrollIntoView({ block:'nearest' });
+              setTimeout(function(){
+                if(panel.isConnected && panel.parentNode) panel.parentNode.removeChild(panel);
+                loadKeyList();
+                loadModels().then(function(){ renderModelsInto('models-body'); renderModelsInto('docs-models-body'); });
+              }, 1500);
+            }).catch(function(){ statusEl.innerHTML='<span class="e">网络错误</span>'; statusEl.scrollIntoView({ block:'nearest' }); saveBtn.disabled=false; });
           };
         };
         var cp=tr.querySelector('.kl-copy'); if(cp) cp.onclick=function(){ cp.disabled=true; var o=cp.textContent; api('/admin/keys/'+id+'/reveal').then(function(r){ cp.disabled=false; if(r.ok && r.body && r.body.api_key){ copy(r.body.api_key, cp); } else { cp.textContent='失败'; setTimeout(function(){cp.textContent=o;},900); } }).catch(function(){ cp.disabled=false; cp.textContent='失败'; setTimeout(function(){cp.textContent=o;},900); }); };

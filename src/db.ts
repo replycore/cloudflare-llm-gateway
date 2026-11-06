@@ -190,6 +190,78 @@ export async function getKeyById(env: Env, id: number): Promise<ApiKeyRow | null
 }
 
 /**
+ * Edit a custom service key: change its base URL and/or service name (slug).
+ * The route validates the format first (slug regex, http(s) base URL);
+ * this does the data-level checks and the writes.
+ * - Changing only the base URL touches just the key row (models are keyed
+ *   by slug, not by address).
+ * - Renaming the slug also renames the service's models
+ *   (`custom:<old>:<model>` → `custom:<new>:<model>`) so routing keeps
+ *   working; the key row and the model rename land in one D1 batch.
+ * Rejected when: the key doesn't exist; it isn't a custom key; the new
+ * slug is already used by a different address (same rule as POST
+ * /keys/custom); the rename would collide with models the target slug
+ * already has (same plain id under the new slug would violate the model
+ * PK). Returns the updated row plus how many models were renamed.
+ */
+export async function updateCustomKey(
+  env: Env,
+  id: number,
+  patch: { baseUrl?: string; slug?: string }
+): Promise<{ row: ApiKeyRow; renamedModels: number }> {
+  const key = await getKeyById(env, id);
+  if (!key) throw new Error("key not found");
+  if (key.provider !== "custom") throw new Error("only custom service keys can be edited");
+  const newBase = patch.baseUrl !== undefined ? patch.baseUrl : key.base_url;
+  const newSlug = patch.slug !== undefined ? patch.slug : key.service_slug;
+  if (!newBase || !newSlug) throw new Error("custom key needs a base_url and a service_slug");
+  if (newSlug !== key.service_slug) {
+    const existing = await customServiceBaseUrl(env, newSlug);
+    if (existing !== null && existing !== newBase) {
+      throw new Error(`服务名 ${newSlug} 已存在，对应另一个地址（${existing}）`);
+    }
+    // A rename must not collide with models the target slug already has.
+    const clash = await env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM keypool_gateway_model_status
+        WHERE model LIKE ?
+          AND substr(model, length(?) + 1) IN (
+            SELECT substr(model, length(?) + 1) FROM keypool_gateway_model_status WHERE model LIKE ?
+          )`
+    )
+      .bind(`custom:${newSlug}:%`, `custom:${newSlug}:`, `custom:${key.service_slug}:`, `custom:${key.service_slug}:%`)
+      .first<{ n: number }>();
+    if ((clash?.n ?? 0) > 0) {
+      throw new Error(`目标服务名 ${newSlug} 下已有 ${clash?.n} 个同名模型，先删掉或换个名字`);
+    }
+  }
+  let renamedModels = 0;
+  if (newSlug !== key.service_slug) {
+    const cnt = await env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM keypool_gateway_model_status WHERE model LIKE ?`
+    )
+      .bind(`custom:${key.service_slug}:%`)
+      .first<{ n: number }>();
+    renamedModels = cnt?.n ?? 0;
+  }
+  const stmts = [
+    env.DB.prepare(
+      `UPDATE keypool_gateway_api_keys SET base_url = ?, service_slug = ? WHERE id = ?`
+    ).bind(newBase, newSlug, id),
+  ];
+  if (newSlug !== key.service_slug) {
+    stmts.push(
+      env.DB.prepare(
+        `UPDATE keypool_gateway_model_status SET model = REPLACE(model, ?, ?) WHERE model LIKE ?`
+      ).bind(`custom:${key.service_slug}:`, `custom:${newSlug}:`, `custom:${key.service_slug}:%`)
+    );
+  }
+  await env.DB.batch(stmts);
+  const row = await getKeyById(env, id);
+  if (!row) throw new Error("key not found");
+  return { row, renamedModels };
+}
+
+/**
  * Delete only PERMANENTLY-dead disabled keys — revoked/invalid keys and hard
  * not-founds. Arrears/欠费/"Access denied (good standing)"/余额不足 are kept:
  * they recover when the account is topped up (the recovery probe revives them).

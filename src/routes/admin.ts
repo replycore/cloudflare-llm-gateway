@@ -34,6 +34,7 @@ import {
   normalizeModelKey,
   addCustomKey,
   customServiceBaseUrl,
+  updateCustomKey,
   firstCustomModel,
 } from "../db";
 import { cooldownMinutes, MAX_CONSECUTIVE_FAILS } from "../keypool";
@@ -387,6 +388,66 @@ app.post("/keys/custom", async (c) => {
   return c.json({ added: result.added, duplicate: result.duplicate, id: result.id, slug, base_url: baseUrl });
 });
 
+// POST /keys/:id/edit — edit a custom service key's base URL and/or service
+// name (slug). Built-in providers have nothing editable here (their provider
+// is fixed and the api_key is rotated by deleting + re-adding). Renaming a
+// slug also renames the service's models (custom:<old>:<model> →
+// custom:<new>:<model>), so callers don't have to re-add them.
+app.post("/keys/:id/edit", async (c) => {
+  const id = parseId(c.req.param("id"));
+  if (id === null) {
+    return c.json({ error: { message: "invalid key id", type: "invalid_request_error" } }, 400);
+  }
+  let body: unknown = null;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: { message: "invalid json body", type: "invalid_request_error" } }, 400);
+  }
+  const b = (body ?? {}) as { base_url?: unknown; service_slug?: unknown };
+  const patch: { baseUrl?: string; slug?: string } = {};
+  if (b.base_url !== undefined) {
+    if (typeof b.base_url !== "string") {
+      return c.json({ error: { message: "base_url 须为字符串", type: "invalid_request_error" } }, 400);
+    }
+    const baseUrl = normalizeBaseUrl(b.base_url);
+    if (!baseUrl) {
+      return c.json({ error: { message: "base_url 须为 http(s) 地址，如 https://ai.example.com/v1", type: "invalid_request_error" } }, 400);
+    }
+    patch.baseUrl = baseUrl;
+  }
+  if (b.service_slug !== undefined) {
+    if (typeof b.service_slug !== "string") {
+      return c.json({ error: { message: "service_slug 须为字符串", type: "invalid_request_error" } }, 400);
+    }
+    const slug = b.service_slug.trim().toLowerCase();
+    if (!isValidServiceSlug(slug)) {
+      return c.json({ error: { message: "服务名须为小写字母/数字/连字符（1-32 字符），如 2api", type: "invalid_request_error" } }, 400);
+    }
+    patch.slug = slug;
+  }
+  if (patch.baseUrl === undefined && patch.slug === undefined) {
+    return c.json({ error: { message: "nothing to update", type: "invalid_request_error" } }, 400);
+  }
+  try {
+    const { row, renamedModels } = await updateCustomKey(c.env, id, patch);
+    return c.json({
+      id: row.id,
+      provider: row.provider,
+      service_slug: row.service_slug,
+      base_url: row.base_url,
+      status: row.status,
+      renamed_models: renamedModels,
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "update failed";
+    if (msg === "key not found") {
+      return c.json({ error: { message: msg, type: "not_found" } }, 404);
+    }
+    return c.json({ error: { message: msg, type: "invalid_request_error" } }, 400);
+  }
+});
+
 // POST /keys/add — JSON { provider, api_key, models[] }: import one key and
 // set models NOT in the list unavailable (so future requests skip them).
 app.post("/keys/add", async (c) => {
@@ -689,6 +750,7 @@ app.get("/keys/list", async (c) => {
       id: k.id,
       provider: k.provider,
       service_slug: k.service_slug,
+      base_url: k.base_url,
       masked: mask(k.api_key),
       status: k.status,
       consecutive_fails: k.consecutive_fails,
