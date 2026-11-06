@@ -284,6 +284,15 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
     .kl-am-top { flex-wrap: wrap; }
     .kl-am-top .kl-am-q { flex: 1 1 100% !important; }
     .kl-am-list label { word-break: break-all; }
+    /* 移动端拉取的模型列表紧凑化：字小、行距紧、复选框小，同样屏高多看约一倍模型。
+       两处同款结构一起收：Key 列表「新增模型」面板（.kl-am-list）与「导入并选择模型」弹窗（#modelList）。
+       label 行内写了 margin:4px 0，得用 !important 盖掉。注意：移动端 input 有 min-height:44px
+       （给文本框的），会把复选框撑到 44px 高、整行变 50px——复选框必须归零 min-height。 */
+    .kl-am-list label, #modelList label { font-size: 12px; line-height: 1.35; margin: 1px 0 !important; }
+    .kl-am-list label input[type=checkbox], #modelList label input[type=checkbox] { width: 13px; height: 13px; min-height: 0 !important; margin-right: 4px; vertical-align: -2px; }
+    .kl-am-list label .badge { font-size: 10px; padding: 1px 5px; }
+    /* 通用：复选框/单选框不受移动端 input 44px 最小高影响（否则所有勾选行都被撑大）。 */
+    input[type=checkbox], input[type=radio] { min-height: 0 !important; }
     /* 模型可用性报错：长 JSON 断行显示，不再单行截断。 */
     #modelstatus-body > div { word-break: break-all; }
   }

@@ -8,7 +8,7 @@
 
 import type { ApiKeyRow, Env, Provider } from "./types";
 import { PROVIDERS } from "./types";
-import { listDueForProbe, markProbed, markAllDueForProbe, getProbeProgress, reactivateKey, applyOutcome, setKeyProjectId, setKeyBalance, setModelStatusBatch, listModelStatus, oneActiveKey, oneActiveKeyRow, firstCustomModel } from "./db";
+import { listDueForProbe, markProbed, markAllDueForProbe, getProbeProgress, reactivateKey, applyOutcome, setKeyProjectId, setKeyBalance, setModelStatusBatch, listModelStatus, oneActiveKey, oneActiveKeyRow, listCustomModels } from "./db";
 import { getAdapter } from "./providers";
 import { makeCustomAdapter, normalizeBaseUrl } from "./providers/custom";
 import { customServiceSlug } from "./providers/types";
@@ -48,22 +48,37 @@ export const OPENROUTER_FREE_PROBE_MODEL = "stealth/crouton-alpha";
 /** Live-probe one key. OpenRouter/DeepSeek also return real balance.
  * Custom keys need `opts.baseUrl` (their service's base URL) and, when the
  * service has an added model, `opts.model` for a real inference probe. */
-export async function probeKey(provider: Provider, key: string, opts?: { baseUrl?: string; model?: string }): Promise<ProbeResult> {
+export async function probeKey(provider: Provider, key: string, opts?: { baseUrl?: string; model?: string; models?: string[] }): Promise<ProbeResult> {
   try {
     if (provider === "custom") {
       const base = normalizeBaseUrl(opts?.baseUrl ?? "");
       if (!base) return { alive: false, status: 0, rateLimited: false, balance: null, error: "自定义服务缺少 base_url" };
       // With a known added model, prove real inference with a 1-token chat;
       // otherwise the /v1/models list is the liveness check (same as mistral/openai).
-      if (opts?.model) {
+      // Try candidate models in order: a service can list models that don't
+      // answer chat completions at all (AMD Token Factory: Clef/d3/d3-flash
+      // are decisions models, OmniVoice is TTS), so a 400 "model not
+      // supported" on one model must not condemn the whole key — try the next.
+      const candidates = opts?.models?.length ? opts.models : opts?.model ? [opts.model] : [];
+      let lastErr = "";
+      let lastStatus = 0;
+      for (const candidate of candidates) {
         const r = await makeCustomAdapter(base).chatCompletions(
-          { model: opts.model, messages: [{ role: "user", content: "hi" }], max_tokens: 1 },
+          { model: candidate, messages: [{ role: "user", content: "hi" }], max_tokens: 1 },
           key
         );
         if (r.status === 401 || r.status === 403) return { alive: false, status: r.status, rateLimited: false, balance: null, error: "invalid key" };
         if (r.ok || r.status === 429) return { alive: r.ok, status: r.status, rateLimited: r.status === 429, balance: null, error: r.ok ? undefined : "限流" };
+        if (r.status === 400) {
+          lastStatus = r.status;
+          lastErr = (await r.text().catch(() => "")) || "";
+          continue;
+        }
         const t = await r.text().catch(() => "");
         return { alive: false, status: r.status, rateLimited: false, balance: null, error: snippet(t) || `http ${r.status}` };
+      }
+      if (candidates.length) {
+        return { alive: false, status: lastStatus || 400, rateLimited: false, balance: null, error: snippet(lastErr) || `http ${lastStatus || 400}` };
       }
       const r = await fetch(`${base}/v1/models`, { headers: { authorization: `Bearer ${key}` } });
       return { alive: r.ok, status: r.status, rateLimited: r.status === 429, balance: null, error: r.ok ? undefined : `http ${r.status}` };
@@ -273,18 +288,18 @@ export interface SweepResult {
  * background rotation — active keys are validated for free by real traffic).
  */
 /** Probe options for a key row: custom keys need their base URL and, when
- * the service has an added model, that model for a real inference probe.
- * Built-ins need nothing. */
+ * the service has added models, a few candidate models for a real inference
+ * probe (tried in order — see probeKey). Built-ins need nothing. */
 export async function probeOptsForKey(
   env: Env,
   key: { provider: Provider; base_url: string | null; service_slug: string | null }
-): Promise<{ baseUrl?: string; model?: string }> {
+): Promise<{ baseUrl?: string; model?: string; models?: string[] }> {
   if (key.provider !== "custom") return {};
-  const opts: { baseUrl?: string; model?: string } = {};
+  const opts: { baseUrl?: string; model?: string; models?: string[] } = {};
   if (key.base_url) opts.baseUrl = key.base_url;
   if (key.service_slug) {
-    const m = await firstCustomModel(env, key.service_slug);
-    if (m) opts.model = m;
+    const ms = await listCustomModels(env, key.service_slug, 4);
+    if (ms.length) { opts.models = ms; opts.model = ms[0]; }
   }
   return opts;
 }

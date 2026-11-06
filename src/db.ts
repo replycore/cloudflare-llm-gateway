@@ -158,6 +158,21 @@ export async function firstCustomModel(env: Env, slug: string): Promise<string |
   return row ? row.model : null;
 }
 
+/** Up to `limit` available model ids for a custom service slug (full
+ * `custom:<slug>:<model>` ids, alphabetical). The probe tries them in order:
+ * a service can list models that don't answer chat completions at all
+ * (AMD Token Factory: Clef/d3/d3-flash are decisions models on
+ * /v1/systemone, OmniVoice is TTS on /v1/audio/speech), so the first
+ * alphabetical model may 400 while the service itself is fine. */
+export async function listCustomModels(env: Env, slug: string, limit = 4): Promise<string[]> {
+  const res = await env.DB.prepare(
+    `SELECT model FROM keypool_gateway_model_status WHERE provider = 'custom' AND model LIKE ? AND available = 1 ORDER BY model ASC LIMIT ?`
+  )
+    .bind(`custom:${slug}:%`, limit)
+    .all<{ model: string }>();
+  return (res.results || []).map((r) => r.model);
+}
+
 /** Providers that currently have at least one active key (for the model list). */
 export async function providersWithActiveKeys(env: Env): Promise<Set<string>> {
   const res = await env.DB.prepare(
