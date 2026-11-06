@@ -1796,6 +1796,9 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
             +'<div style="display:flex;gap:8px;align-items:center;margin-bottom:6px"><input class="kl-am-q" placeholder="筛选模型…" style="flex:1"><button class="btn primary small kl-am-add" disabled>添加选中</button><button class="btn ghost small kl-am-cancel">取消</button></div>'
             +'<div class="kl-am-status hint">正在用该 key 向上游拉取模型列表…</div>'
             +'<div class="kl-am-list" style="max-height:220px;overflow:auto;margin-top:6px"></div>'
+            +'<div style="margin-top:10px;border-top:1px solid var(--line);padding-top:8px"><div class="hint" style="margin-bottom:4px">自定义模型：不在上游列表里的模型 ID 也可以直接加（每行一个；下次探活会自动验证，调不通的会被屏蔽）</div>'
+            +'<textarea class="kl-am-custom" rows="2" placeholder="例如 openai/gpt-oss-120b:free" style="width:100%;box-sizing:border-box"></textarea>'
+            +'<div style="margin-top:6px"><button class="btn small kl-am-addcustom">添加自定义</button></div></div>'
             +'</div></td>';
           tr.parentNode.insertBefore(panel, tr.nextSibling);
           var listEl=panel.querySelector('.kl-am-list');
@@ -1843,6 +1846,28 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
               loadModels().then(function(){ renderModelsInto('models-body'); renderModelsInto('docs-models-body'); });
               addBtn.disabled=false;
             }).catch(function(){ statusEl.innerHTML='<span class="e">网络错误</span>'; addBtn.disabled=false; });
+          };
+          // 自定义模型：直接输入模型 ID（每行一个），不依赖上游列表是否拉取成功。
+          var customBtn=panel.querySelector('.kl-am-addcustom');
+          if(customBtn) customBtn.onclick=function(){
+            var ta=panel.querySelector('.kl-am-custom');
+            var typed=(ta.value||'').split(/[\n,;]+/).map(function(s){ return s.trim(); }).filter(Boolean);
+            var bad=typed.filter(function(s){ return /\s/.test(s); });
+            var list=typed.filter(function(s){ return !/\s/.test(s); });
+            list=list.filter(function(v,i){ return list.indexOf(v)===i; });
+            if(!list.length){ statusEl.innerHTML='<span class="e">先输入模型 ID（每行一个，ID 里不能有空格）</span>'; return; }
+            customBtn.disabled=true; statusEl.textContent='添加中…';
+            api('/admin/keys/'+id+'/models',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({models:list})}).then(function(r){
+              if(!r.ok){
+                statusEl.innerHTML='<span class="e">添加失败 '+esc((r.body&&r.body.error&&r.body.error.message)||('错误 '+r.status))+'</span>';
+                customBtn.disabled=false; return;
+              }
+              var note=bad.length?(' · 已跳过含空格的输入：'+esc(bad.join('、'))):'';
+              statusEl.innerHTML='<span class="k">已添加 '+(r.body.added||0)+' 个新模型（共提交 '+(r.body.total||0)+' 个）</span> · 模型列表已刷新'+note;
+              ta.value='';
+              loadModels().then(function(){ renderModelsInto('models-body'); renderModelsInto('docs-models-body'); });
+              customBtn.disabled=false;
+            }).catch(function(){ statusEl.innerHTML='<span class="e">网络错误</span>'; customBtn.disabled=false; });
           };
         };
         var cp=tr.querySelector('.kl-copy'); if(cp) cp.onclick=function(){ cp.disabled=true; var o=cp.textContent; api('/admin/keys/'+id+'/reveal').then(function(r){ cp.disabled=false; if(r.ok && r.body && r.body.api_key){ copy(r.body.api_key, cp); } else { cp.textContent='失败'; setTimeout(function(){cp.textContent=o;},900); } }).catch(function(){ cp.disabled=false; cp.textContent='失败'; setTimeout(function(){cp.textContent=o;},900); }); };

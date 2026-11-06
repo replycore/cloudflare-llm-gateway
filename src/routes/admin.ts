@@ -284,7 +284,11 @@ app.post("/keys/:id/models", async (c) => {
       raw
         .filter((m): m is string => typeof m === "string")
         .map((m) => m.trim())
-        .filter(Boolean)
+        // Model ids are single tokens: drop anything with whitespace (a
+        // pasted phrase is never a valid id) and absurdly long ids. This
+        // also guards the custom-model input in the console, which posts
+        // ids the upstream list never returned.
+        .filter((m) => Boolean(m) && !/\s/.test(m) && m.length <= 200)
     )
   ).slice(0, 200);
   const already = new Set(
