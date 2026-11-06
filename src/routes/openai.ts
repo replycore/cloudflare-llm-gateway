@@ -4,7 +4,8 @@ import { Hono } from "hono";
 import type { Env } from "../types";
 import type { OpenAIChatRequest } from "../providers/types";
 import { requireUser, resolveCaller } from "../auth";
-import { checkTokenLimits, providersWithActiveKeys, availableModelSet, listAvailableModels, getBalanceMicro, getChargeTotalMicro } from "../db";
+import { checkTokenLimits, providersWithActiveKeys, availableModelSet, listAvailableModels, listAliases, getBalanceMicro, getChargeTotalMicro } from "../db";
+import type { TokenScope } from "../types";
 import { serveChat, AUTO_MODEL } from "../chat";
 import { anthropicToOpenAI, openAIToAnthropic, openAIStreamToAnthropic } from "../anthropic";
 import type { AnthropicRequest } from "../anthropic";
@@ -22,8 +23,13 @@ app.use("*", requireUser);
  *  via live fetch (`model_status` available=1), for providers with an active
  *  key. Deliberately NOT the static adapter lists: those ids are hardcoded,
  *  and listing them as servable when they were never added (or were blocked
- *  and their rows deleted) would advertise models that can't serve. */
-export async function servableModels(env: Env): Promise<Array<{ id: string; owner: string }>> {
+ *  and their rows deleted) would advertise models that can't serve.
+ *  An aliases-scoped token sees ONLY the enabled virtual aliases. */
+export async function servableModels(env: Env, scope: TokenScope = "full"): Promise<Array<{ id: string; owner: string }>> {
+  const aliases = (await listAliases(env)).filter((a) => a.enabled);
+  if (scope === "aliases") {
+    return aliases.map((a) => ({ id: a.alias, owner: "keypool" }));
+  }
   const avail = await providersWithActiveKeys(env);
   // BLOCKED set: models explicitly marked unavailable (a never-probed model is
   // available by default, so it won't appear here).
@@ -41,6 +47,12 @@ export async function servableModels(env: Env): Promise<Array<{ id: string; owne
     if (seen.has(row.model) || blocked.has(row.model)) continue;
     seen.add(row.model);
     out.push({ id: row.model, owner: row.provider });
+  }
+  // Enabled virtual aliases: usable by any caller, listed last.
+  for (const a of aliases) {
+    if (seen.has(a.alias)) continue;
+    seen.add(a.alias);
+    out.push({ id: a.alias, owner: "keypool" });
   }
   return out;
 }
@@ -66,7 +78,8 @@ function modelEntry(m: { id: string; owner: string }) {
  *  (`object`+`data` for OpenAI; `data`+`has_more`+`first_id`/`last_id` for
  *  Anthropic). */
 app.get("/models", async (c) => {
-  const data = (await servableModels(c.env)).map(modelEntry);
+  const caller = await resolveCaller(c.env, c.req.raw);
+  const data = (await servableModels(c.env, caller.scope)).map(modelEntry);
   return c.json({
     object: "list",
     data,
@@ -78,7 +91,8 @@ app.get("/models", async (c) => {
 
 app.get("/models/:id{.+}", async (c) => {
   const id = c.req.param("id");
-  const m = (await servableModels(c.env)).find((x) => x.id === id);
+  const caller = await resolveCaller(c.env, c.req.raw);
+  const m = (await servableModels(c.env, caller.scope)).find((x) => x.id === id);
   if (!m) return c.json({ error: { message: `model not found: ${id}`, type: "invalid_request_error" } }, 404);
   return c.json(modelEntry(m));
 });

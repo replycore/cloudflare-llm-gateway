@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS keypool_gateway_access_tokens (
   token      TEXT    NOT NULL UNIQUE,
   name       TEXT,
   role       TEXT    NOT NULL DEFAULT 'user',          -- user | admin
+  scope      TEXT    NOT NULL DEFAULT 'full',          -- full | aliases (aliases: /v1/models lists only virtual aliases)
   enabled    INTEGER NOT NULL DEFAULT 1,
   expires_at     INTEGER,
   rpm_limit      INTEGER,
@@ -108,4 +109,17 @@ CREATE TABLE IF NOT EXISTS keypool_gateway_model_status (
   available    INTEGER NOT NULL DEFAULT 1,
   last_checked INTEGER,
   reason       TEXT
+);
+
+-- Model aliases (virtual models): a short name that maps to one or more
+-- real models. Strategy "failover" tries targets in order; "loadbalance"
+-- picks one at random per request. A token with scope='aliases' only sees
+-- these names in /v1/models and can only chat through them.
+CREATE TABLE IF NOT EXISTS keypool_gateway_model_aliases (
+  alias      TEXT PRIMARY KEY,                    -- virtual name, e.g. "abc"
+  targets    TEXT NOT NULL,                       -- JSON array of real model ids
+  strategy   TEXT NOT NULL DEFAULT 'failover',    -- failover | loadbalance
+  enabled    INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
 );

@@ -53,13 +53,15 @@ function modelPath(c: Context<AppEnv>): string {
 }
 
 app.get("/models", async (c) => {
-  const models = (await servableModels(c.env)).map((m) => geminiModelEntry(m.id, m.owner));
+  const caller = await resolveCaller(c.env, c.req.raw);
+  const models = (await servableModels(c.env, caller.scope)).map((m) => geminiModelEntry(m.id, m.owner));
   return c.json({ models });
 });
 
 app.get("/models/*", async (c) => {
   const id = modelPath(c);
-  const m = (await servableModels(c.env)).find((x) => x.id === id);
+  const caller = await resolveCaller(c.env, c.req.raw);
+  const m = (await servableModels(c.env, caller.scope)).find((x) => x.id === id);
   if (!m) return gErr(c, 404, `models/${id} is not found`);
   return c.json(geminiModelEntry(m.id, m.owner));
 });

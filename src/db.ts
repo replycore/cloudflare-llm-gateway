@@ -1,6 +1,6 @@
 /** D1 data layer — all key/token/log access lives here. */
 
-import type { Env, Provider, ApiKeyRow, Outcome, Role } from "./types";
+import type { Env, Provider, ApiKeyRow, Outcome, Role, TokenScope } from "./types";
 import { stripProviderPrefix } from "./providers/types";
 
 /** Normalize a model id for price lookup: strip any `provider:` routing
@@ -673,16 +673,16 @@ export async function resolveToken(env: Env, token: string): Promise<Role | null
 export async function resolveTokenFull(
   env: Env,
   token: string
-): Promise<{ role: Role; id: number | null; ownerSub: string | null } | null> {
+): Promise<{ role: Role; id: number | null; ownerSub: string | null; scope: TokenScope } | null> {
   if (!token) return null;
-  if (timingSafeEqual(token, env.ADMIN_TOKEN ?? "")) return { role: "admin", id: null, ownerSub: null };
+  if (timingSafeEqual(token, env.ADMIN_TOKEN ?? "")) return { role: "admin", id: null, ownerSub: null, scope: "full" };
   const now = Date.now();
   const row = await env.DB.prepare(
-    `SELECT id, role, owner_sub FROM keypool_gateway_access_tokens WHERE token = ? AND enabled = 1 AND (expires_at IS NULL OR expires_at > ?)`
+    `SELECT id, role, owner_sub, scope FROM keypool_gateway_access_tokens WHERE token = ? AND enabled = 1 AND (expires_at IS NULL OR expires_at > ?)`
   )
     .bind(token, now)
-    .first<{ id: number; role: Role; owner_sub: string | null }>();
-  return row ? { role: row.role, id: row.id, ownerSub: row.owner_sub } : null;
+    .first<{ id: number; role: Role; owner_sub: string | null; scope: string | null }>();
+  return row ? { role: row.role, id: row.id, ownerSub: row.owner_sub, scope: row.scope === "aliases" ? "aliases" : "full" } : null;
 }
 
 /** Constant-time string compare (for ADMIN_TOKEN, so a timing probe can't
@@ -835,26 +835,29 @@ export async function createToken(
   opts: {
     name?: string;
     role?: Role;
+    scope?: TokenScope;
     ownerSub?: string | null;
     expiresAt?: number | null;
     rpmLimit?: number | null;
     quotaRequests?: number | null;
   }
-): Promise<{ token: string; name: string | null; role: Role }> {
+): Promise<{ token: string; name: string | null; role: Role; scope: TokenScope }> {
   const token = generateToken();
   const name = opts.name ?? null;
   const role: Role = opts.role ?? "user";
+  const scope: TokenScope = opts.scope ?? "full";
   const ownerSub = opts.ownerSub ?? null;
   const now = Date.now();
 
   await env.DB.prepare(
-    `INSERT INTO keypool_gateway_access_tokens (token, name, role, owner_sub, enabled, expires_at, rpm_limit, quota_requests, used_requests, created_at)
-     VALUES (?, ?, ?, ?, 1, ?, ?, ?, 0, ?)`
+    `INSERT INTO keypool_gateway_access_tokens (token, name, role, scope, owner_sub, enabled, expires_at, rpm_limit, quota_requests, used_requests, created_at)
+     VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, 0, ?)`
   )
     .bind(
       token,
       name,
       role,
+      scope,
       ownerSub,
       opts.expiresAt ?? null,
       opts.rpmLimit ?? null,
@@ -863,7 +866,7 @@ export async function createToken(
     )
     .run();
 
-  return { token, name, role };
+  return { token, name, role, scope };
 }
 
 /** Increment a token's lifetime request counter (after a successful call).
@@ -1087,14 +1090,15 @@ export async function setUserStatus(
 /** List access tokens (do not expose ADMIN_TOKEN — it isn't stored here). Capped at 1000. */
 export async function listTokens(
   env: Env
-): Promise<Array<{ id: number; name: string | null; role: Role; owner_sub: string | null; enabled: number; expires_at: number | null; rpm_limit: number | null; quota_requests: number | null; used_requests: number; created_at: number }>> {
+): Promise<Array<{ id: number; name: string | null; role: Role; scope: TokenScope; owner_sub: string | null; enabled: number; expires_at: number | null; rpm_limit: number | null; quota_requests: number | null; used_requests: number; created_at: number }>> {
   const res = await env.DB.prepare(
-    `SELECT id, name, role, owner_sub, enabled, expires_at, rpm_limit, quota_requests, used_requests, created_at FROM keypool_gateway_access_tokens ORDER BY created_at DESC LIMIT 1000`
+    `SELECT id, name, role, scope, owner_sub, enabled, expires_at, rpm_limit, quota_requests, used_requests, created_at FROM keypool_gateway_access_tokens ORDER BY created_at DESC LIMIT 1000`
   ).all();
   return (res.results ?? []) as unknown as Array<{
     id: number;
     name: string | null;
     role: Role;
+    scope: TokenScope;
     owner_sub: string | null;
     enabled: number;
     expires_at: number | null;
@@ -1408,6 +1412,97 @@ export async function listAvailableModels(
     `SELECT model, provider FROM keypool_gateway_model_status WHERE available = 1`
   ).all();
   return (res.results ?? []) as unknown as Array<{ model: string; provider: string }>;
+}
+
+/** Model aliases (virtual models): a short name mapping to one or more real
+ *  models, with a failover (try in order) or loadbalance (pick one per
+ *  request) strategy. */
+
+export type AliasStrategy = "failover" | "loadbalance";
+
+export interface ModelAlias {
+  alias: string;
+  targets: string[];
+  strategy: AliasStrategy;
+  enabled: number;
+}
+
+type AliasRow = { alias: string; targets: string; strategy: string; enabled: number };
+
+/** Parse an alias row: targets is a JSON array of real model ids. A row
+ *  with a malformed targets blob is dropped (it can never resolve). */
+function parseAliasRow(row: AliasRow): ModelAlias | null {
+  let targets: unknown;
+  try {
+    targets = JSON.parse(row.targets);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(targets) || !targets.length || !targets.every((t) => typeof t === "string" && t)) return null;
+  return {
+    alias: row.alias,
+    targets: targets as string[],
+    strategy: row.strategy === "loadbalance" ? "loadbalance" : "failover",
+    enabled: row.enabled,
+  };
+}
+
+/** All aliases, enabled and disabled, alphabetical. */
+export async function listAliases(env: Env): Promise<ModelAlias[]> {
+  const res = await env.DB.prepare(
+    `SELECT alias, targets, strategy, enabled FROM keypool_gateway_model_aliases ORDER BY alias`
+  ).all();
+  const out: ModelAlias[] = [];
+  for (const row of (res.results ?? []) as AliasRow[]) {
+    const a = parseAliasRow(row);
+    if (a) out.push(a);
+  }
+  return out;
+}
+
+/** One enabled alias by name, or null. Disabled aliases never resolve. */
+export async function getAlias(env: Env, name: string): Promise<ModelAlias | null> {
+  const row = await env.DB.prepare(
+    `SELECT alias, targets, strategy, enabled FROM keypool_gateway_model_aliases WHERE alias = ? AND enabled = 1`
+  )
+    .bind(name)
+    .first<AliasRow>();
+  return row ? parseAliasRow(row) : null;
+}
+
+/** Create or replace an alias. Validation lives in the route. */
+export async function upsertAlias(
+  env: Env,
+  alias: string,
+  targets: string[],
+  strategy: AliasStrategy
+): Promise<void> {
+  const now = Date.now();
+  await env.DB.prepare(
+    `INSERT INTO keypool_gateway_model_aliases (alias, targets, strategy, enabled, created_at, updated_at)
+     VALUES (?, ?, ?, 1, ?, ?)
+     ON CONFLICT(alias) DO UPDATE SET targets = excluded.targets, strategy = excluded.strategy, updated_at = excluded.updated_at`
+  )
+    .bind(alias, JSON.stringify(targets), strategy, now, now)
+    .run();
+}
+
+export async function deleteAlias(env: Env, alias: string): Promise<boolean> {
+  const res = await env.DB.prepare(
+    `DELETE FROM keypool_gateway_model_aliases WHERE alias = ?`
+  )
+    .bind(alias)
+    .run();
+  return (res.meta?.changes ?? 0) > 0;
+}
+
+export async function setAliasEnabled(env: Env, alias: string, enabled: boolean): Promise<boolean> {
+  const res = await env.DB.prepare(
+    `UPDATE keypool_gateway_model_aliases SET enabled = ?, updated_at = ? WHERE alias = ?`
+  )
+    .bind(enabled ? 1 : 0, Date.now(), alias)
+    .run();
+  return (res.meta?.changes ?? 0) > 0;
 }
 
 /** Upsert a model's availability status. last_checked = now (epoch-ms). */

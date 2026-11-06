@@ -621,6 +621,33 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
         </div>
       </section>
 
+      <!-- ----- admin: 模型映射 ----- -->
+      <section class="section" id="sec-aliases">
+        <h2 class="sec-h">模型映射</h2>
+        <p class="sec-sub">// 一个虚拟模型名，映射到一个或多个真实模型</p>
+        <div class="card r2">
+          <h2 class="h-blue"><span class="hd"></span>新建 / 修改映射</h2>
+          <div class="row">
+            <div><label>映射名</label><input id="alias-name" placeholder="例如 abc" autocomplete="off" /></div>
+            <div><label>策略</label><select id="alias-strategy"><option value="failover">故障转移（按顺序试）</option><option value="loadbalance">负载均衡（每次随机挑一个）</option></select></div>
+            <button class="btn primary" id="alias-save">保存映射</button>
+          </div>
+          <div style="margin-top:10px"><label>目标模型（每行一个真实模型 id，例如 openai/gpt-4o 或 custom:aihubmix:deepseek-chat）</label><textarea id="alias-targets" rows="3" placeholder="openai/gpt-4o&#10;custom:aihubmix:deepseek-chat" style="width:100%"></textarea></div>
+          <p class="hint">映射名只能是字母、数字、-、_（不能叫 auto）。客户端用映射名调聊天时，网关按策略走到真实模型；发一个「仅映射」范围的令牌，/v1/models 里就只看到这些映射名。</p>
+          <div class="out" id="alias-out" style="display:none"></div>
+        </div>
+        <div class="card r1">
+          <h2 class="h-green"><span class="hd"></span>映射列表
+            <span style="flex:1"></span>
+            <button class="btn ghost small" id="aliases-refresh">刷新</button>
+          </h2>
+          <table>
+            <thead><tr><th>映射名</th><th>目标模型</th><th>策略</th><th>启用</th><th>操作</th></tr></thead>
+            <tbody id="alias-list"><tr><td colspan="5" style="color:var(--faint)">加载中…</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+
       <!-- ----- admin: 用户 ----- -->
       <section class="section" id="sec-users">
         <h2 class="sec-h">用户</h2>
@@ -650,6 +677,7 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
             <div><label>限速(RPM)</label><input id="adm-rpm" type="number" min="1" placeholder="无限" /></div>
             <div><label>有效期(天)</label><input id="adm-exp" type="number" min="1" placeholder="永久" /></div>
             <div><label>角色</label><select id="adm-role"><option value="user">用户</option><option value="admin">管理员</option></select></div>
+            <div><label>范围</label><select id="adm-scope"><option value="full">全部模型</option><option value="aliases">仅映射模型</option></select></div>
             <button class="btn primary" id="adm-mint">发一个令牌</button>
           </div>
           <p class="hint">仅显示一次，请立即复制保存</p>
@@ -1061,6 +1089,7 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
       {id:'debugchat',   label:'调试聊天', color:'blue'},
       {id:'keys',        label:'Key 池', color:'yellow'},
       {id:'keylist',     label:'Key 列表', color:'red'},
+      {id:'aliases',     label:'模型映射', color:'blue'},
       {id:'users',       label:'用户', color:'blue'},
       {id:'admintokens', label:'令牌', color:'green'},
       {id:'logs',        label:'日志', color:'amber'},
@@ -1111,6 +1140,7 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
     if(id==='keylist'){ var rb=$('keylist-refresh'); if(rb) rb.onclick=loadKeyList; var cb=$('keylist-checkall'); if(cb) cb.onclick=checkAllKeys; var tg=$('keylist-toggle'); if(tg) tg.onclick=function(){ keylistShowDisabled=!keylistShowDisabled; loadKeyList(); }; var pr=$('keylist-prune'); if(pr) pr.onclick=function(){ if(!confirm('清理所有永久失效的 key?欠费的会保留')) return; pr.disabled=true; var out=$('keylist-checkall-out'); if(out) out.textContent='清理中…'; api('/admin/keys/prune',{method:'POST'}).then(function(r){ pr.disabled=false; if(out) out.textContent='已清理 '+((r.body&&r.body.removed)||0)+' 个失效 key'; loadKeyList(); }).catch(function(){ pr.disabled=false; if(out) out.textContent='清理出错'; }); }; loadKeyList(); }
     if(id==='users') loadUsers();
     if(id==='admintokens') loadAdminTokens();
+    if(id==='aliases') loadAliases();
     if(id==='usage'){ var ur=$('usage-refresh'); if(ur) ur.onclick=loadUserUsage; loadUserUsage(); }
     if(id==='logs'){
       var lr=$('logs-refresh'); if(lr) lr.onclick=loadAdminUsage;
@@ -2386,7 +2416,7 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
       if(!list.length){ tb.innerHTML='<tr><td colspan="10" style="color:var(--faint)">还没有</td></tr>'; return; }
       tb.innerHTML = list.map(function(t){
         return '<tr><td>'+t.id+'</td><td style="font-weight:700">'+esc(t.name||'–')+'</td>'
-          + '<td><span class="badge">'+esc(ROLE_CN[t.role]||t.role)+'</span></td>'
+          + '<td><span class="badge">'+esc(ROLE_CN[t.role]||t.role)+'</span>'+(t.scope==='aliases'?' <span class="badge">仅映射</span>':'')+'</td>'
           + '<td>'+(t.owner_sub==null?'<span class="badge">全局</span>':'<span style="color:var(--faint)" title="'+esc(t.owner_sub)+'">…'+esc(String(t.owner_sub).slice(-8))+'</span>')+'</td>'
           + '<td class="n">'+t.used_requests+'/'+(t.quota_requests==null?'∞':t.quota_requests)+'</td>'
           + '<td class="n">'+(t.rpm_limit==null?'∞':t.rpm_limit)+'</td>'
@@ -2408,10 +2438,12 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
     var name=$('adm-tname').value.trim();
     var q=parseInt($('adm-quota').value,10), rpm=parseInt($('adm-rpm').value,10), exp=parseInt($('adm-exp').value,10);
     var role=$('adm-role').value;
+    var scope=$('adm-scope').value;
     var payload={name:name};
     if(q>0) payload.quota_requests=q;
     if(rpm>0) payload.rpm_limit=rpm;
     if(exp>0) payload.expires_in_days=exp;
+    if(scope==='aliases') payload.scope='aliases';
     if(role==='admin'){ if(!confirm('发放管理员令牌？该令牌可访问管理接口。')) return; payload.role='admin'; }
     var btn=$('adm-mint'); var lbl=btn.textContent; btn.disabled=true; btn.textContent='发放中…';
     api('/admin/tokens',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload)})
@@ -2420,6 +2452,69 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
       o.innerHTML='新令牌(立即复制): <span class="k mono-token copyable" data-copy="'+esc(r.body.token)+'">'+esc(r.body.token)+'</span>';
       bindCopy(o); $('adm-tname').value=''; $('adm-quota').value=''; $('adm-rpm').value=''; $('adm-exp').value=''; loadAdminTokens();
     }).catch(function(){ btn.disabled=false; btn.textContent=lbl; });
+  }
+
+  // ---------------- model aliases ----------------
+  function loadAliases(){
+    var tb=$('alias-list');
+    if(tb) tb.innerHTML='<tr><td colspan="5" style="color:var(--faint)">加载中…</td></tr>';
+    return api('/admin/aliases').then(function(r){
+      if(!r.ok){ if(tb) tb.innerHTML='<tr><td colspan="5"><span class="e">错误 '+r.status+'</span></td></tr>'; return; }
+      var list = Array.isArray(r.body)? r.body : [];
+      if(!list.length){ if(tb) tb.innerHTML='<tr><td colspan="5" style="color:var(--faint)">还没有映射</td></tr>'; return; }
+      tb.innerHTML = list.map(function(a){
+        var targets = Array.isArray(a.targets) ? a.targets : [];
+        return '<tr><td style="font-weight:700">'+esc(a.alias)+'</td>'
+          + '<td style="word-break:break-all">'+targets.map(function(t){ return esc(t); }).join('<br>')+'</td>'
+          + '<td><span class="badge">'+(a.strategy==='loadbalance'?'负载均衡':'故障转移')+'</span></td>'
+          + '<td><span class="dot '+(a.enabled?'d-active':'d-disabled')+'"></span>'+(a.enabled?'启用':'停用')+'</td>'
+          + '<td><button class="btn ghost small" data-toggle="'+esc(a.alias)+'" data-enabled="'+(a.enabled?1:0)+'">'+(a.enabled?'停用':'启用')+'</button> '
+          + '<button class="btn ghost small" data-edit="'+esc(a.alias)+'">编辑</button> '
+          + '<button class="btn ghost small" data-delalias="'+esc(a.alias)+'">删除</button></td></tr>';
+      }).join('');
+      Array.prototype.forEach.call(tb.querySelectorAll('[data-toggle]'), function(b){
+        b.onclick = function(){
+          var alias=b.getAttribute('data-toggle');
+          var enabled=b.getAttribute('data-enabled')!=='1';
+          b.disabled=true;
+          api('/admin/aliases/'+encodeURIComponent(alias)+'/enable',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({enabled:enabled})}).then(function(r){ b.disabled=false; if(r.ok) loadAliases(); }).catch(function(){ b.disabled=false; });
+        };
+      });
+      Array.prototype.forEach.call(tb.querySelectorAll('[data-edit]'), function(b){
+        b.onclick = function(){
+          var alias=b.getAttribute('data-edit');
+          var row=list.filter(function(a){ return a.alias===alias; })[0];
+          if(!row) return;
+          $('alias-name').value=row.alias;
+          $('alias-strategy').value=row.strategy||'failover';
+          $('alias-targets').value=(Array.isArray(row.targets)?row.targets:[]).join('\n');
+          window.scrollTo(0,0);
+        };
+      });
+      Array.prototype.forEach.call(tb.querySelectorAll('[data-delalias]'), function(b){
+        b.onclick = function(){
+          var alias=b.getAttribute('data-delalias');
+          if(!confirm('删除映射 '+alias+'？用这个映射名的调用将立即失败。')) return;
+          b.disabled=true;
+          api('/admin/aliases/'+encodeURIComponent(alias),{method:'DELETE'}).then(function(r){ b.disabled=false; if(r.ok) loadAliases(); }).catch(function(){ b.disabled=false; });
+        };
+      });
+    }).catch(function(){ if(tb) tb.innerHTML='<tr><td colspan="5"><span class="e">网络错误</span></td></tr>'; });
+  }
+  function createAlias(){
+    var name=$('alias-name').value.trim();
+    var strategy=$('alias-strategy').value;
+    var targets=$('alias-targets').value.split('\n').map(function(s){ return s.trim(); }).filter(function(s){ return s; });
+    var out=$('alias-out'); out.style.display='block';
+    if(!name){ out.innerHTML='<span class="e">先填映射名</span>'; return; }
+    if(!targets.length){ out.innerHTML='<span class="e">先填至少一个目标模型</span>'; return; }
+    var btn=$('alias-save'); var lbl=btn.textContent; btn.disabled=true; btn.textContent='保存中…';
+    api('/admin/aliases',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({alias:name,targets:targets,strategy:strategy})})
+    .then(function(r){ btn.disabled=false; btn.textContent=lbl;
+      if(!r.ok){ out.innerHTML='<span class="e">错误 '+r.status+(r.body&&r.body.error?': '+esc(r.body.error.message):'')+'</span>'; return; }
+      out.innerHTML='已保存映射 '+esc(name)+'（'+targets.length+' 个目标 · '+(strategy==='loadbalance'?'负载均衡':'故障转移')+'）';
+      $('alias-name').value=''; $('alias-targets').value=''; loadAliases();
+    }).catch(function(){ btn.disabled=false; btn.textContent=lbl; out.innerHTML='<span class="e">网络错误</span>'; });
   }
 
   // ---------------- wire static handlers ----------------
@@ -2436,6 +2531,8 @@ try{var _t=localStorage.getItem('kp_theme');if(_t==='dark'||(_t!=='light'&&windo
   $('users-refresh').onclick = loadUsers;
   $('adm-mint').onclick = mintAdmin;
   $('adm-tokens-refresh').onclick = loadAdminTokens;
+  $('alias-save').onclick = createAlias;
+  $('aliases-refresh').onclick = loadAliases;
   $('bill-topup').onclick = topUp;
   $('bill-balances-refresh').onclick = loadBalances;
   $('bill-txns-refresh').onclick = loadBillingTxns;

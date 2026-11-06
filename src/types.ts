@@ -120,3 +120,7 @@ export type Outcome =
   | { kind: "transient"; reason: string };
 
 export type Role = "admin" | "user";
+
+/** Token scope: "full" sees every servable model; "aliases" only sees the
+ *  virtual model aliases in /v1/models and can only chat through them. */
+export type TokenScope = "full" | "aliases";

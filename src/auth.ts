@@ -1,7 +1,7 @@
 /** Hono auth middleware: `requireUser`, `requireAdmin`. */
 
 import type { MiddlewareHandler } from "hono";
-import type { Env, Role } from "./types";
+import type { Env, Role, TokenScope } from "./types";
 import { resolveToken, resolveTokenFull, getUserBySub } from "./db";
 import { getSession } from "./oidc";
 
@@ -12,22 +12,22 @@ import { getSession } from "./oidc";
 export async function resolveCaller(
   env: Env,
   req: Request
-): Promise<{ tokenId: number | null; ownerSub: string | null }> {
+): Promise<{ tokenId: number | null; ownerSub: string | null; scope: TokenScope }> {
   const token = extractToken(req);
   if (token) {
     const full = await resolveTokenFull(env, token);
     if (full) {
       // Admins are operators, not consumers: never metered or billed.
-      if (full.role === "admin") return { tokenId: null, ownerSub: null };
-      return { tokenId: full.id, ownerSub: full.ownerSub };
+      if (full.role === "admin") return { tokenId: null, ownerSub: null, scope: "full" };
+      return { tokenId: full.id, ownerSub: full.ownerSub, scope: full.scope };
     }
   }
   const sess = await getSession(env, req);
   if (sess) {
-    if (sess.role === "admin") return { tokenId: null, ownerSub: null };
-    return { tokenId: null, ownerSub: sess.sub };
+    if (sess.role === "admin") return { tokenId: null, ownerSub: null, scope: "full" };
+    return { tokenId: null, ownerSub: sess.sub, scope: "full" };
   }
-  return { tokenId: null, ownerSub: null };
+  return { tokenId: null, ownerSub: null, scope: "full" };
 }
 
 /** OpenAI-shaped 403 for a logged-in-but-not-approved consumer. */

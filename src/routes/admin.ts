@@ -36,6 +36,10 @@ import {
   customServiceBaseUrl,
   updateKey,
   firstCustomModel,
+  listAliases,
+  upsertAlias,
+  deleteAlias,
+  setAliasEnabled,
 } from "../db";
 import { cooldownMinutes, MAX_CONSECUTIVE_FAILS } from "../keypool";
 import { runHealthCheck } from "../cron";
@@ -641,6 +645,7 @@ app.post("/tokens", async (c) => {
   let opts: {
     name?: string;
     role?: "admin" | "user";
+    scope?: "full" | "aliases";
     quotaRequests?: number | null;
     rpmLimit?: number | null;
     expiresAt?: number | null;
@@ -653,6 +658,7 @@ app.post("/tokens", async (c) => {
         const b = body as {
           name?: unknown;
           role?: unknown;
+          scope?: unknown;
           quota_requests?: unknown;
           rpm_limit?: unknown;
           expires_in_days?: unknown;
@@ -662,6 +668,8 @@ app.post("/tokens", async (c) => {
         // capped at 10 years so a typo can't mint a forever token.
         if (typeof b.name === "string") opts.name = b.name.slice(0, 100);
         if (b.role === "admin" || b.role === "user") opts.role = b.role;
+        // scope "aliases" mints a token that only sees virtual aliases.
+        if (b.scope === "aliases" || b.scope === "full") opts.scope = b.scope;
         if (b.quota_requests !== undefined) {
           if (typeof b.quota_requests !== "number" || !Number.isInteger(b.quota_requests) || b.quota_requests <= 0) {
             return c.json({ error: { message: "quota_requests must be a positive integer", type: "invalid_request_error" } }, 400);
@@ -705,6 +713,70 @@ app.delete("/tokens/:id", async (c) => {
     return c.json({ error: { message: "invalid token id", type: "invalid_request_error" } }, 400);
   }
   const ok = await deleteToken(c.env, id);
+  return c.json({ ok }, ok ? 200 : 404);
+});
+
+// GET /aliases — list all model aliases.
+app.get("/aliases", async (c) => {
+  return c.json(await listAliases(c.env));
+});
+
+// POST /aliases — create or replace a model alias.
+app.post("/aliases", async (c) => {
+  let b: unknown;
+  try {
+    b = await c.req.json();
+  } catch {
+    return c.json({ error: { message: "invalid json body", type: "invalid_request_error" } }, 400);
+  }
+  if (!b || typeof b !== "object") {
+    return c.json({ error: { message: "invalid json body", type: "invalid_request_error" } }, 400);
+  }
+  const body = b as { alias?: unknown; targets?: unknown; strategy?: unknown };
+  // Alias names are bare words: they must not collide with real model ids
+  // (which carry "/" or ":"), with "auto", or with each other.
+  if (typeof body.alias !== "string" || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(body.alias)) {
+    return c.json({ error: { message: "alias must be 1-64 chars of letters, digits, - or _", type: "invalid_request_error" } }, 400);
+  }
+  if (body.alias.toLowerCase() === "auto") {
+    return c.json({ error: { message: "alias must not be \"auto\"", type: "invalid_request_error" } }, 400);
+  }
+  if (!Array.isArray(body.targets) || !body.targets.length || body.targets.length > 16) {
+    return c.json({ error: { message: "targets must be 1-16 model ids", type: "invalid_request_error" } }, 400);
+  }
+  const targets: string[] = [];
+  for (const t of body.targets) {
+    if (typeof t !== "string" || !t.trim() || t.includes(" ") || t.length > 200) {
+      return c.json({ error: { message: "each target must be a model id (no spaces, <= 200 chars)", type: "invalid_request_error" } }, 400);
+    }
+    targets.push(t.trim());
+  }
+  const strategy = body.strategy === "loadbalance" ? "loadbalance" : "failover";
+  await upsertAlias(c.env, body.alias, targets, strategy);
+  return c.json({ ok: true, alias: body.alias });
+});
+
+// DELETE /aliases/:alias — delete a model alias.
+app.delete("/aliases/:alias", async (c) => {
+  const alias = c.req.param("alias");
+  const ok = await deleteAlias(c.env, alias);
+  return c.json({ ok }, ok ? 200 : 404);
+});
+
+// POST /aliases/:alias/enable — enable or disable a model alias.
+app.post("/aliases/:alias/enable", async (c) => {
+  const alias = c.req.param("alias");
+  let b: unknown;
+  try {
+    b = await c.req.json();
+  } catch {
+    b = {};
+  }
+  const enabled = (b as { enabled?: unknown } | null)?.enabled;
+  if (typeof enabled !== "boolean") {
+    return c.json({ error: { message: "enabled must be a boolean", type: "invalid_request_error" } }, 400);
+  }
+  const ok = await setAliasEnabled(c.env, alias, enabled);
   return c.json({ ok }, ok ? 200 : 404);
 });
 

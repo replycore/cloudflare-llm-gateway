@@ -6,7 +6,7 @@
  * which translates around it).
  */
 
-import type { Env, Provider } from "./types";
+import type { Env, Provider, TokenScope } from "./types";
 import { PROVIDERS } from "./types";
 import type { OpenAIChatRequest } from "./providers/types";
 import { routeModelToProvider, FALLBACK_MODEL, clampMaxTokens, customServiceSlug } from "./providers/types";
@@ -24,6 +24,7 @@ import {
   priceForModel,
   availableModelSet,
   listAvailableModels,
+  getAlias,
 } from "./db";
 import { applyReasoning, canReason, normalizeChatRequest, normalizeReasoningResponse, normEffort } from "./reasoning";
 
@@ -133,6 +134,8 @@ export function isAutoModel(model: string): boolean {
 export interface Caller {
   tokenId: number | null;
   ownerSub: string | null;
+  /** Token scope: "aliases" callers may only use virtual model aliases. */
+  scope: TokenScope;
 }
 
 export async function serveChat(
@@ -144,7 +147,28 @@ export async function serveChat(
   flattenTextParts(body);
   normalizeChatRequest(body);
   const auto = isAutoModel(body.model);
-  const provider = routeModelToProvider(body.model);
+  // Resolve a model alias (virtual model) to its real targets before
+  // routing: the alias name itself has no provider prefix and must never
+  // reach an upstream. Alias names are bare words (no "/" or ":", enforced
+  // by the admin route), so a model id containing either can never be an
+  // alias and skips the lookup — the hot path stays at two D1 reads.
+  const looksLikeAlias = !auto && !body.model.includes("/") && !body.model.includes(":");
+  const alias = looksLikeAlias ? await getAlias(env, body.model) : null;
+  // An aliases-scoped token may only chat through virtual aliases.
+  if (caller.scope === "aliases" && !alias) {
+    return new Response(
+      JSON.stringify({ error: { message: "this token can only use model aliases", type: "invalid_request_error" } }),
+      { status: 403, headers: { "content-type": "application/json" } }
+    );
+  }
+  // Primary model for billing / provider routing: the first failover target,
+  // the load-balanced pick, or the requested model itself.
+  const primaryModel = alias
+    ? alias.strategy === "loadbalance"
+      ? alias.targets[Math.floor(Math.random() * alias.targets.length)]
+      : alias.targets[0]
+    : body.model;
+  const provider = routeModelToProvider(primaryModel);
   const promptChars = (body.messages ?? []).reduce((sum, m) => {
     const content: unknown = m.content;
     if (typeof content === "string") return sum + content.length;
@@ -173,7 +197,7 @@ export async function serveChat(
   // below must not release the hold for streams (the background scan does).
   let streamed = false;
   if (billing) {
-    hold = await estimateMaxCostMicro(env, body.model, promptChars, maxTokens);
+    hold = await estimateMaxCostMicro(env, primaryModel, promptChars, maxTokens);
     if (!(await reserveBalance(env, caller.ownerSub as string, hold))) {
       return new Response(
         JSON.stringify({ error: { message: "余额不足,请充值", type: "insufficient_balance" } }),
@@ -186,42 +210,63 @@ export async function serveChat(
     const allowFallback = (body as { fallback?: unknown }).fallback !== false;
     if ("fallback" in body) delete (body as { fallback?: unknown }).fallback;
     const avail = await providersWithActiveKeys(env);
-    let order: Provider[] = [provider];
-    // Per-provider model to send when serving "auto".
-    const pick: Partial<Record<Provider, string>> = {};
+    // Attempts are (provider, model) pairs tried in order. A failover alias
+    // tries each target in turn; everything else tries the primary model
+    // first, then the usual per-provider fallback models (cheapest first).
+    let attempts: Array<{ prov: Provider; model: string }> = [];
     if (auto) {
       const effort = normEffort((body as { reasoning_effort?: unknown }).reasoning_effort);
       const cands = await autoCandidates(env, avail, !!effort && effort !== "none");
-      for (const c of cands) pick[c.p] = c.model;
-      order = cands.map((c) => c.p);
-      if (!allowFallback) order = order.slice(0, 1);
-    } else if (allowFallback) {
-      // Fallback providers must have a real fallback model: elevenlabs and
-      // stability have no chat model (FALLBACK_MODEL is ""), so sending them
-      // an empty model would fail pointlessly.
-      const others = PROVIDERS.filter((p) => p !== provider && avail.has(p) && FALLBACK_MODEL[p]);
-      const priced = await Promise.all(
-        others.map(async (p) => ({ p, price: (await priceForModel(env, FALLBACK_MODEL[p])).output }))
-      );
-      priced.sort((a, b) => a.price - b.price);
-      for (const x of priced) order.push(x.p);
+      attempts = cands.map((c) => ({ prov: c.p, model: c.model }));
+      if (!allowFallback) attempts = attempts.slice(0, 1);
+    } else if (alias && alias.strategy === "failover") {
+      const seenProv = new Set<Provider>();
+      for (const t of alias.targets) {
+        const p = routeModelToProvider(t);
+        attempts.push({ prov: p, model: t });
+        seenProv.add(p);
+      }
+      if (allowFallback) {
+        // Fallback providers must have a real fallback model: elevenlabs and
+        // stability have no chat model (FALLBACK_MODEL is ""), so sending them
+        // an empty model would fail pointlessly.
+        const others = PROVIDERS.filter((p) => !seenProv.has(p) && avail.has(p) && FALLBACK_MODEL[p]);
+        const priced = await Promise.all(
+          others.map(async (p) => ({ p, price: (await priceForModel(env, FALLBACK_MODEL[p])).output }))
+        );
+        priced.sort((a, b) => a.price - b.price);
+        for (const x of priced) attempts.push({ prov: x.p, model: FALLBACK_MODEL[x.p] });
+      }
+    } else {
+      attempts = [{ prov: provider, model: primaryModel }];
+      if (allowFallback) {
+        // Fallback providers must have a real fallback model: elevenlabs and
+        // stability have no chat model (FALLBACK_MODEL is ""), so sending them
+        // an empty model would fail pointlessly.
+        const others = PROVIDERS.filter((p) => p !== provider && avail.has(p) && FALLBACK_MODEL[p]);
+        const priced = await Promise.all(
+          others.map(async (p) => ({ p, price: (await priceForModel(env, FALLBACK_MODEL[p])).output }))
+        );
+        priced.sort((a, b) => a.price - b.price);
+        for (const x of priced) attempts.push({ prov: x.p, model: FALLBACK_MODEL[x.p] });
+      }
     }
 
     let res: Response | null = null;
     let servedBy: Provider = provider;
-    let servedModel = body.model;
+    let servedModel = primaryModel;
     let fellBack = false;
     // Hold release for streaming: the reserve stays locked until the
     // background scan has charged the real usage (see onStreamCharged).
     const releaseHold = billing && hold > 0
       ? () => refundBalance(env, caller.ownerSub as string, hold)
       : undefined;
-    for (let i = 0; i < order.length; i++) {
-      const prov = order[i];
+    for (let i = 0; i < attempts.length; i++) {
+      const prov = attempts[i].prov;
       // Custom services have no registry adapter: each key carries its own
       // base URL, so the adapter is built per key inside the attempt.
       const adapter = prov === "custom" ? null : getAdapter(prov);
-      const useModel = auto ? (pick[prov] as string) : prov === provider ? body.model : FALLBACK_MODEL[prov];
+      const useModel = attempts[i].model;
       // Custom models are `custom:<slug>:<model>` — the slug picks which
       // service's keys the pool tries (keys of other services must not mix).
       const slug = prov === "custom" ? customServiceSlug(useModel) ?? undefined : undefined;
@@ -230,9 +275,13 @@ export async function serveChat(
       const clamped = clampMaxTokens(prov, (body as { max_tokens?: number }).max_tokens, useModel);
       // Thinking params are provider-specific, so translate per attempt
       // (a fallback can land on a provider with a different dialect).
+      // The upstream always gets the resolved model: for an alias the
+      // virtual name must never leak through (the primary attempt used to
+      // pass body.model unchanged, which was the real model then — now
+      // useModel already is body.model for a plain primary attempt).
       const reqBody: OpenAIChatRequest = applyReasoning(
         prov,
-        prov === provider && !auto ? { ...body, max_tokens: clamped } : { ...body, model: useModel, max_tokens: clamped }
+        { ...body, model: useModel, max_tokens: clamped }
       );
       // Ask for a usage frame in the stream so the scan can bill exact
       // tokens instead of estimating from character counts.
