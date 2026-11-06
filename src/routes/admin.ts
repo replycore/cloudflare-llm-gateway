@@ -688,6 +688,7 @@ app.get("/keys/list", async (c) => {
     keys: keys.map((k) => ({
       id: k.id,
       provider: k.provider,
+      service_slug: k.service_slug,
       masked: mask(k.api_key),
       status: k.status,
       consecutive_fails: k.consecutive_fails,
